@@ -62,6 +62,9 @@ pub struct Args {
     /// Print solver statistics after solving
     #[arg(long, default_value_t = false)]
     pub stats: bool,
+    /// Trace decisions, eager/lazy quantifier instances and backtracks to stderr
+    #[arg(long, default_value_t = false)]
+    pub trace_decisions: bool,
     /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,

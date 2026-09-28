@@ -8,7 +8,7 @@ use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
-use crate::log::is_important;
+use crate::log::{is_important, trace_decisions};
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
@@ -104,6 +104,12 @@ pub struct CustomExternalPropagator<'a> {
     // at the end (only complete then, as new literals appear during the search).
     pub trail_writer: Option<std::io::BufWriter<std::fs::File>>,
     pub trail_atoms: std::collections::HashMap<i32, String>,
+    // --trace-decisions state: the next observed assignment after a new
+    // decision level is the decision literal (CaDiCaL flushes all pending
+    // assignments before deciding), and each variable created while applying
+    // a quantifier instance is tagged with that instance's number.
+    pub awaiting_decision: bool,
+    pub var_origin: DeterministicHashMap<i32, u64>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -291,14 +297,37 @@ impl<'a> CustomExternalPropagator<'a> {
         &mut self,
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
+        // Variables for these instances were created by `materialize_next` and
+        // are not yet observed; tag them before tracing so the trace shows them.
+        if trace_decisions() {
+            let next_inst = self.stats.instantiations + 1;
+            for var in self.last_observed_var..self.solver_state.cnf_cache.next_var {
+                self.var_origin.insert(var, next_inst);
+            }
+        }
         for inst in instances {
-            let clauses = match inst {
+            let (kind, clauses) = match inst {
                 Instantiation { clauses } => {
                     self.stats.instantiations += 1;
-                    clauses
+                    ("qi", clauses)
                 }
-                Skolemization { clauses } => clauses,
+                Skolemization { clauses } => ("skolem", clauses),
             };
+            if trace_decisions() {
+                let clauses_str: Vec<String> = clauses
+                    .iter()
+                    .map(|c| {
+                        let lits: Vec<String> = c.iter().map(|l| self.trace_lit(*l)).collect();
+                        format!("({})", lits.join(" ∨ "))
+                    })
+                    .collect();
+                eprintln!(
+                    "[trace] {kind} #{} level={} {}",
+                    self.stats.instantiations,
+                    self.decision_level,
+                    clauses_str.join(" ∧ ")
+                );
+            }
             for clause in clauses {
                 self.queue_external_clause(clause.clone());
             }
@@ -312,6 +341,22 @@ impl<'a> CustomExternalPropagator<'a> {
             z3.drain_merge_queue(self.solver_state);
         }
         self.sync_new_vars();
+    }
+
+    /// Render a literal for `--trace-decisions`: signed var, origin and term.
+    fn trace_lit(&self, lit: i32) -> String {
+        let origin = match self.var_origin.get(&lit.abs()) {
+            Some(inst) => format!("qi#{inst}"),
+            None => "base".to_string(),
+        };
+        let sign = if lit < 0 { "¬" } else { "" };
+        let term = match self.solver_state.cnf_cache.var_map_reverse.get(&lit.abs()) {
+            Some(&uid) if !self.solver_state.get_term_safe(uid).is_none() => {
+                format!("{}", self.solver_state.get_term(uid))
+            }
+            _ => "?".to_string(),
+        };
+        format!("{lit}({origin}):{sign}{term}")
     }
 
     /// Materialize up to `cap` items from the current matching round.
@@ -396,6 +441,16 @@ impl<'a> CustomExternalPropagator<'a> {
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
+        if self.awaiting_decision && !lits.is_empty() {
+            self.awaiting_decision = false;
+            if trace_decisions() {
+                eprintln!(
+                    "[trace] decide level={} {}",
+                    self.decision_level,
+                    self.trace_lit(lits[0])
+                );
+            }
+        }
         debug_println!(
             22,
             0,
@@ -534,6 +589,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level + 1
         );
         self.decision_level += 1;
+        self.awaiting_decision = true;
         self.reset_eager_qi_for_level();
         // Record solver hash at new level
         while self.decision_level >= self.solver_state.hash_at_level.len() {
@@ -576,7 +632,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
+        if trace_decisions() {
+            eprintln!("[trace] backtrack {} -> {}", self.decision_level, level);
+        }
         self.decision_level = level;
+        self.awaiting_decision = false;
         self.reset_eager_qi_for_level();
 
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
