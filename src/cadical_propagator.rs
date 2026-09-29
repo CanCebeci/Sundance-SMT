@@ -356,6 +356,11 @@ impl<'a> CustomExternalPropagator<'a> {
     /// Add instances from the current partial assignment: find all trigger
     /// matches and materialize every instance. Skolemization remains a
     /// complete-model operation.
+    ///
+    /// Called from `cb_has_external_clause` whenever the clause queue is empty.
+    /// CaDiCaL keeps asking for external clauses until none are left before it
+    /// decides, so every decision is preceded by a round over the final
+    /// propagated e-graph. A round that finds only known matches adds nothing.
     fn eagerly_instantiate_quantifiers(&mut self) {
         if !self.eager_qi
             || self.materializing_quantifiers
@@ -510,10 +515,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        // Trigger matching, like incremental arithmetic above, can use a
-        // partial assignment. Existing pending work is always consumed before
-        // another matching round is created.
-        self.eagerly_instantiate_quantifiers();
         #[cfg(feature = "z3-solver")]
         self.check_partial_arithmetic_trail();
     }
@@ -889,7 +890,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
-        // For now, no external clauses
+        // CaDiCaL asks until the queue is empty before deciding, so this is the
+        // last point to add instances for the current assignment.
+        if self.queued_clauses.borrow().is_empty() {
+            self.eagerly_instantiate_quantifiers();
+        }
         if (*self.queued_clauses.borrow_mut()).is_empty() {
             false
         } else {
