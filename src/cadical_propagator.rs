@@ -441,14 +441,19 @@ impl<'a> CustomExternalPropagator<'a> {
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
-        if self.awaiting_decision && !lits.is_empty() {
+        // The first batch after a new decision level starts with the decision
+        // literal if it is observed. CaDiCaL notifies even when nothing observed
+        // was assigned, so an empty batch means it decided an unobserved variable
+        // (e.g. a proof-only variable, which is in no clause and so propagates
+        // nothing); the next batch would then start with an unrelated literal.
+        if self.awaiting_decision {
             self.awaiting_decision = false;
             if trace_decisions() {
-                eprintln!(
-                    "[trace] decide level={} {}",
-                    self.decision_level,
-                    self.trace_lit(lits[0])
-                );
+                let decided = match lits.first() {
+                    Some(lit) => self.trace_lit(*lit),
+                    None => "<unobserved>".to_string(),
+                };
+                eprintln!("[trace] decide level={} {}", self.decision_level, decided);
             }
         }
         debug_println!(
