@@ -21,60 +21,6 @@ use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[derive(Clone, Copy)]
-pub(crate) enum EagerQiMode {
-    Disabled,
-    Bounded { limit: usize, remaining: usize },
-    FullRound { started: bool },
-}
-
-enum EagerQiAction {
-    Bounded(usize),
-    FullRound,
-}
-
-impl EagerQiMode {
-    pub(crate) fn new(value: i32) -> Self {
-        if value < 0 {
-            Self::FullRound { started: false }
-        } else if value == 0 {
-            Self::Disabled
-        } else {
-            let limit = usize::try_from(value).expect("positive i32 must fit in usize");
-            Self::Bounded {
-                limit,
-                remaining: limit,
-            }
-        }
-    }
-
-    fn next_action(&mut self) -> Option<EagerQiAction> {
-        match self {
-            Self::Disabled | Self::Bounded { remaining: 0, .. } => None,
-            Self::Bounded { remaining, .. } => Some(EagerQiAction::Bounded(*remaining)),
-            Self::FullRound { started: true } => None,
-            Self::FullRound { started } => {
-                *started = true;
-                Some(EagerQiAction::FullRound)
-            }
-        }
-    }
-
-    fn consume(&mut self, count: usize) {
-        if let Self::Bounded { remaining, .. } = self {
-            *remaining -= count;
-        }
-    }
-
-    fn reset(&mut self) {
-        match self {
-            Self::Disabled => {}
-            Self::Bounded { limit, remaining } => *remaining = *limit,
-            Self::FullRound { started } => *started = false,
-        }
-    }
-}
-
 /// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
@@ -87,7 +33,8 @@ pub struct CustomExternalPropagator<'a> {
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
-    pub(crate) eager_qi: EagerQiMode,
+    /// Instantiate after every batch of assignments, not only at complete models
+    pub eager_qi: bool,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -406,35 +353,22 @@ impl<'a> CustomExternalPropagator<'a> {
         true
     }
 
-    fn reset_eager_qi_for_level(&mut self) {
-        self.eager_qi.reset();
-    }
-
-    /// Add instances from the current partial assignment according to the
-    /// configured per-level eager mode. Skolemization remains a complete-model
-    /// operation.
+    /// Add instances from the current partial assignment: find all trigger
+    /// matches and materialize every instance. Skolemization remains a
+    /// complete-model operation.
     fn eagerly_instantiate_quantifiers(&mut self) {
-        if self.materializing_quantifiers || !self.disequalities.borrow().is_empty() {
+        if !self.eager_qi
+            || self.materializing_quantifiers
+            || !self.disequalities.borrow().is_empty()
+        {
             return;
         }
 
-        match self.eager_qi.next_action() {
-            None => {}
-            Some(EagerQiAction::FullRound) => {
-                // Work from an earlier matching round must not be discarded or
-                // mixed with the one fresh round for this level.
-                self.materialize_pending(0);
-                if self.start_quantifier_instantiation_round(false) {
-                    self.materialize_pending(0);
-                }
-            }
-            Some(EagerQiAction::Bounded(budget)) => {
-                if self.pending.is_none() && !self.start_quantifier_instantiation_round(false) {
-                    return;
-                }
-                let materialized = self.materialize_pending(budget);
-                self.eager_qi.consume(materialized);
-            }
+        // A new matching round requires that no earlier round (e.g. one the
+        // complete-model check left partly materialized) is still pending.
+        self.materialize_pending(0);
+        if self.start_quantifier_instantiation_round(false) {
+            self.materialize_pending(0);
         }
     }
 }
@@ -595,7 +529,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         self.decision_level += 1;
         self.awaiting_decision = true;
-        self.reset_eager_qi_for_level();
         // Record solver hash at new level
         while self.decision_level >= self.solver_state.hash_at_level.len() {
             self.solver_state
@@ -642,7 +575,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         self.decision_level = level;
         self.awaiting_decision = false;
-        self.reset_eager_qi_for_level();
 
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
         // any congruence merges from `union_to_eclass` replay, so the queue

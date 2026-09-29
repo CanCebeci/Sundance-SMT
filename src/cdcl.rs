@@ -3,7 +3,7 @@
 
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
-use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode};
+use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
@@ -47,7 +47,7 @@ pub fn cdcl_decision_procedure(
     reverse: bool,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
-    eager_qi: i32,
+    eager_qi: bool,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -100,7 +100,7 @@ pub fn cdcl_decision_procedure(
         arithmetic,
         stats: SolverStats::new(),
         pending: None,
-        eager_qi: EagerQiMode::new(eager_qi),
+        eager_qi,
         materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,

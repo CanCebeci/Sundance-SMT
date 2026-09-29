@@ -44,10 +44,10 @@ pub struct Args {
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
-    /// Max quantifier instantiations to add eagerly at each decision level.
-    /// A negative value exhausts one fresh matching round per level; 0 disables eager QI.
-    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
-    pub eager_qi: i32,
+    /// Instantiate quantifiers eagerly: after every batch of assignments, find all
+    /// trigger matches and add every instance, instead of waiting for a complete model
+    #[arg(long, default_value_t = false)]
+    pub eager_qi: bool,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
     /// (Simplify/Z3-style auto-trigger inference). When off (default), an
     /// untriggered `forall` panics instead.
