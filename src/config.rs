@@ -56,6 +56,10 @@ pub struct Args {
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,
+    /// Set CaDiCaL's `reverse` option: newly created variables enter the back of
+    /// the VMTF decision queue instead of the front (also reverses initial order)
+    #[arg(long, default_value_t = false)]
+    pub reverse: bool,
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,

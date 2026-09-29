@@ -44,6 +44,7 @@ pub fn cdcl_decision_procedure(
     arithmetic: ArithSolver,
     timeout: u64,
     elevate: i32,
+    reverse: bool,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
     eager_qi: i32,
@@ -52,6 +53,10 @@ pub fn cdcl_decision_procedure(
     assert!(
         solver.set("elevate".to_string(), elevate),
         "CaDiCaL option 'elevate' is unavailable; Sundance requires the cadical-sys elevate fork for lazy quantifier instantiation"
+    );
+    assert!(
+        solver.set("reverse".to_string(), reverse as i32),
+        "CaDiCaL option 'reverse' is unavailable"
     );
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>

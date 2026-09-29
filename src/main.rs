@@ -204,6 +204,7 @@ fn main() -> Result<(), String> {
         args.arithmetic,
         args.timeout,
         args.elevate,
+        args.reverse,
         args.max_arith_conflicts_per_round,
         args.batch_cap,
         args.eager_qi,
