@@ -25,7 +25,7 @@ use std::rc::Rc;
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
     pub solver_state: &'a mut SolverState,
-    pub disequalities: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
+    pub queued_clauses: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
@@ -221,7 +221,7 @@ impl<'a> CustomExternalPropagator<'a> {
         self.proof_tracer
             .borrow_mut()
             .register_clause_for_cadical_callback(&clause);
-        self.disequalities.borrow_mut().push(clause);
+        self.queued_clauses.borrow_mut().push(clause);
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
@@ -359,7 +359,7 @@ impl<'a> CustomExternalPropagator<'a> {
     fn eagerly_instantiate_quantifiers(&mut self) {
         if !self.eager_qi
             || self.materializing_quantifiers
-            || !self.disequalities.borrow().is_empty()
+            || !self.queued_clauses.borrow().is_empty()
         {
             return;
         }
@@ -494,8 +494,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     debug_println!(
                         14 - 3,
                         0,
-                        "In case 1 currently disequalities: {:?}",
-                        self.disequalities.borrow()
+                        "In case 1 currently queued clauses: {:?}",
+                        self.queued_clauses.borrow()
                     );
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
@@ -503,8 +503,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     debug_println!(
                         14 - 3,
                         0,
-                        "We have the following disequalities: {:?}",
-                        self.disequalities.borrow()
+                        "We have the following queued clauses: {:?}",
+                        self.queued_clauses.borrow()
                     );
                 }
             }
@@ -619,11 +619,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .collect::<Vec<_>>(),
         );
 
-        if !self.disequalities.borrow_mut().is_empty() {
+        if !self.queued_clauses.borrow_mut().is_empty() {
             debug_println!(
                 24,
                 0,
-                "Trying to check model when the disequalities are not empty"
+                "Trying to check model when the queued clauses are not empty"
             );
             self.stats.conflicts += 1;
             return false;
@@ -799,7 +799,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             ArithResult::None => {}
         }
 
-        if !self.disequalities.borrow().is_empty() {
+        if !self.queued_clauses.borrow().is_empty() {
             self.stats.conflicts += 1;
             return false;
         }
@@ -830,7 +830,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(11, 0, "Starting quantifier instantiations");
         if !self.start_quantifier_instantiation_round(true) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
-            assert!(self.disequalities.borrow().is_empty());
+            assert!(self.queued_clauses.borrow().is_empty());
             return true;
         }
 
@@ -890,12 +890,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             is_forgettable
         );
         // For now, no external clauses
-        if (*self.disequalities.borrow_mut()).is_empty() {
+        if (*self.queued_clauses.borrow_mut()).is_empty() {
             false
         } else {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
-            let clause_len = self.disequalities.borrow().last().map_or(0, |c| c.len());
+            let clause_len = self.queued_clauses.borrow().last().map_or(0, |c| c.len());
             match clause_len {
                 0 | 1 => {} // don't count unit or empty clauses
                 2 => self.stats.binary_clauses += 1,
@@ -904,8 +904,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             debug_println!(
                 4,
                 0,
-                "In cb_has_external_clause: We have the following disequalities: {:?}",
-                self.disequalities.borrow()[0]
+                "In cb_has_external_clause: We have the following queued clauses: {:?}",
+                self.queued_clauses.borrow()[0]
             );
             true
         }
@@ -913,9 +913,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_add_external_clause_lit(&mut self) -> i32 {
         // For now, no external clauses
-        let mut v = self.disequalities.borrow_mut();
+        let mut v = self.queued_clauses.borrow_mut();
         assert!(!v.is_empty());
-        debug_println!(4, 0, "We start with the following disequalities: {:?}", v);
+        debug_println!(4, 0, "We start with the following queued clauses: {:?}", v);
         let last_index = v.len() - 1;
         debug_println!(11, 0, "We have the next clause {:?}", v[last_index]);
         let literal = if v[last_index].is_empty() {

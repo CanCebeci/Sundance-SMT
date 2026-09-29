@@ -92,7 +92,7 @@ pub fn cdcl_decision_procedure(
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
-        disequalities: RefCell::new(vec![]),
+        queued_clauses: RefCell::new(vec![]),
         fixed_literals: DeterministicHashSet::default(),
         proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
         assignments: vec![0, 0],
@@ -134,7 +134,7 @@ pub fn cdcl_decision_procedure(
         add_clause_to_proof_and_solver(clause, &mut solver, &proof_tracer, None);
     }
 
-    // adding this into disequalities instead so that it appears as a theory lemma
+    // adding this into the queued clauses instead so that it appears as a theory lemma
     for clause in &boolean_dt_constraints {
         add_clause_to_proof_and_solver(clause, &mut solver, &proof_tracer, Some(Theory::Datatypes));
     }
