@@ -48,6 +48,11 @@ pub struct Args {
     /// trigger matches and add every instance, instead of waiting for a complete model
     #[arg(long, default_value_t = false)]
     pub eager_qi: bool,
+    /// Largest generation of instances added by `--eager-qi` (input terms are
+    /// generation 0; an instance is one more than its bindings). Bounds matching
+    /// loops; instances above it are left to the complete-model check.
+    #[arg(long, default_value_t = 10)]
+    pub max_qi_generation: u32,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
     /// (Simplify/Z3-style auto-trigger inference). When off (default), an
     /// untriggered `forall` panics instead.

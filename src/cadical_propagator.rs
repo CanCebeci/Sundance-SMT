@@ -35,6 +35,8 @@ pub struct CustomExternalPropagator<'a> {
     pub pending: Option<PendingInstantiations>,
     /// Instantiate after every batch of assignments, not only at complete models
     pub eager_qi: bool,
+    /// Largest instance generation eager rounds may add (complete-model rounds are unlimited)
+    pub max_qi_generation: u32,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -253,12 +255,15 @@ impl<'a> CustomExternalPropagator<'a> {
             }
         }
         for inst in instances {
-            let (kind, clauses) = match inst {
-                Instantiation { clauses } => {
+            let (kind, generation, clauses) = match inst {
+                Instantiation {
+                    clauses,
+                    generation,
+                } => {
                     self.stats.instantiations += 1;
-                    ("qi", clauses)
+                    ("qi", format!(" gen={generation}"), clauses)
                 }
-                Skolemization { clauses } => ("skolem", clauses),
+                Skolemization { clauses } => ("skolem", String::new(), clauses),
             };
             if trace_decisions() {
                 let clauses_str: Vec<String> = clauses
@@ -269,7 +274,7 @@ impl<'a> CustomExternalPropagator<'a> {
                     })
                     .collect();
                 eprintln!(
-                    "[{kind}] #{} level={} {}",
+                    "[{kind}] #{} level={}{generation} {}",
                     self.stats.instantiations,
                     self.decision_level,
                     clauses_str.join(" ∧ ")
@@ -338,10 +343,18 @@ impl<'a> CustomExternalPropagator<'a> {
 
     /// Refresh trigger matches only after every item from the previous matching
     /// round has been materialized.
-    fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
+    fn start_quantifier_instantiation_round(
+        &mut self,
+        allow_skolemization: bool,
+        max_generation: Option<u32>,
+    ) -> bool {
         debug_assert!(self.pending.is_none());
-        let pending =
-            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
+        let pending = instantiate_quantifiers(
+            self.solver_state,
+            &self.assignments,
+            allow_skolemization,
+            max_generation,
+        );
         if pending.is_empty() {
             return false;
         }
@@ -372,7 +385,7 @@ impl<'a> CustomExternalPropagator<'a> {
         // A new matching round requires that no earlier round (e.g. one the
         // complete-model check left partly materialized) is still pending.
         self.materialize_pending(0);
-        if self.start_quantifier_instantiation_round(false) {
+        if self.start_quantifier_instantiation_round(false, Some(self.max_qi_generation)) {
             self.materialize_pending(0);
         }
     }
@@ -829,7 +842,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
-        if !self.start_quantifier_instantiation_round(true) {
+        if !self.start_quantifier_instantiation_round(true, None) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.queued_clauses.borrow().is_empty());
             return true;

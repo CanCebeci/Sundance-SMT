@@ -22,8 +22,13 @@ use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, 
 
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
-    Instantiation { clauses: Vec<Vec<i32>> },
-    Skolemization { clauses: Vec<Vec<i32>> },
+    Instantiation {
+        clauses: Vec<Vec<i32>>,
+        generation: u32,
+    },
+    Skolemization {
+        clauses: Vec<Vec<i32>>,
+    },
 }
 
 struct DeferredInstantiation {
@@ -31,6 +36,8 @@ struct DeferredInstantiation {
     is_exists: bool,
     literal: i32,
     quantifier_id: u64,
+    /// One more than the largest generation among the match's bindings
+    generation: u32,
 }
 
 struct DeferredSkolemization {
@@ -58,10 +65,19 @@ impl PendingInstantiations {
 
 /// Computes trigger matches and substitutions, returning deferred items
 /// that can be materialized one at a time.
+///
+/// A match's instance has generation one more than the match's generation: the
+/// largest generation among the e-nodes its trigger matched (input terms are 0;
+/// terms an instance introduces get the instance's generation). With
+/// `max_generation`, matches whose instance would exceed it are skipped without
+/// being recorded as added, so a later round without the limit can still
+/// instantiate them. This bounds matching loops: only finitely many terms have
+/// a generation up to the limit, and so only finitely many matches.
 pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
     allow_skolemization: bool,
+    max_generation: Option<u32>,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
@@ -139,7 +155,12 @@ pub(crate) fn instantiate_quantifiers(
                 continue;
             }
 
-            for subs_ids in list_assignments.iter() {
+            for (subs_ids, match_generation) in list_assignments.iter() {
+                let generation = match_generation + 1;
+                if max_generation.is_some_and(|max| generation > max) {
+                    continue;
+                }
+
                 // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
                 let subs: DeterministicHashMap<Local, Term> = subs_ids
                     .iter()
@@ -170,6 +191,7 @@ pub(crate) fn instantiate_quantifiers(
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
                     quantifier_id: quantifier.id,
+                    generation,
                 });
             }
         }
@@ -316,6 +338,7 @@ fn process_deferred_instantiations(
         is_exists,
         literal,
         quantifier_id,
+        generation,
     } in deferred_instantiations
     {
         let t = if is_exists {
@@ -346,6 +369,8 @@ fn process_deferred_instantiations(
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
+        // E-nodes this instance introduces inherit its generation (reset below)
+        solver_state.egraph.current_generation = generation;
         solver_state.insert_predecessor(&nnf_term, None, None, true);
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
@@ -401,6 +426,7 @@ fn process_deferred_instantiations(
 
         let additional_constraints =
             check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
+        solver_state.egraph.current_generation = 0;
         proof_tracer.borrow_mut().push_steps(
             &additional_constraints,
             ProofStepType::TheoryClause(Theory::Background),
@@ -409,7 +435,10 @@ fn process_deferred_instantiations(
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
 
-        results.push(QuantifierInstance::Instantiation { clauses });
+        results.push(QuantifierInstance::Instantiation {
+            clauses,
+            generation,
+        });
     }
     results
 }
