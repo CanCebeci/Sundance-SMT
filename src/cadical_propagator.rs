@@ -322,7 +322,7 @@ impl<'a> CustomExternalPropagator<'a> {
                     })
                     .collect();
                 eprintln!(
-                    "[trace] {kind} #{} level={} {}",
+                    "[{kind}] #{} level={} {}",
                     self.stats.instantiations,
                     self.decision_level,
                     clauses_str.join(" ∧ ")
@@ -453,7 +453,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     Some(lit) => self.trace_lit(*lit),
                     None => "<unobserved>".to_string(),
                 };
-                eprintln!("[trace] decide level={} {}", self.decision_level, decided);
+                eprintln!("[decide] level={} {}", self.decision_level, decided);
             }
         }
         debug_println!(
@@ -638,7 +638,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         if trace_decisions() {
-            eprintln!("[trace] backtrack {} -> {}", self.decision_level, level);
+            eprintln!("[backtrack] {} -> {}", self.decision_level, level);
         }
         self.decision_level = level;
         self.awaiting_decision = false;
