@@ -29,6 +29,17 @@ pub fn trace_decisions() -> bool {
     TRACE_DECISIONS.load(Ordering::Relaxed)
 }
 
+/// Whether to trace the relevant e-nodes of each eager matching round
+static TRACE_RELEVANCY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_trace_relevancy(enabled: bool) {
+    TRACE_RELEVANCY.store(enabled, Ordering::SeqCst);
+}
+
+pub fn trace_relevancy() -> bool {
+    TRACE_RELEVANCY.load(Ordering::Relaxed)
+}
+
 /// Debug macro -> used to print debug statements
 #[macro_export]
 macro_rules! debug_println {

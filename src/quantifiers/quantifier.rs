@@ -10,7 +10,7 @@ use std::rc::Rc;
 use crate::arithmetic::simplify::ArithSimplify;
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
-use crate::log::trace_decisions;
+use crate::log::trace_relevancy;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
@@ -88,7 +88,7 @@ pub(crate) fn instantiate_quantifiers(
     let relevant: Option<std::collections::BTreeSet<u32>> =
         relevant_only.then(|| relevant_enodes(solver_state, assignments));
     if let Some(relevant) = &relevant
-        && trace_decisions()
+        && trace_relevancy()
     {
         eprintln!("[relevancy] {} relevant e-nodes", relevant.len());
         let mut ids: Vec<u32> = relevant.iter().copied().collect();

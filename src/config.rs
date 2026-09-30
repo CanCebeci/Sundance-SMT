@@ -85,6 +85,9 @@ pub struct Args {
     /// Trace decisions, eager/lazy quantifier instances and backtracks to stderr
     #[arg(long, default_value_t = false)]
     pub trace_decisions: bool,
+    /// Trace the relevant e-nodes of each `--relevancy` matching round to stderr
+    #[arg(long, default_value_t = false)]
+    pub trace_relevancy: bool,
     /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,
