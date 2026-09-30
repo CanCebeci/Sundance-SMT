@@ -37,6 +37,8 @@ pub struct CustomExternalPropagator<'a> {
     pub eager_qi: bool,
     /// Largest instance generation eager rounds may add (complete-model rounds are unlimited)
     pub max_qi_generation: u32,
+    /// Eager rounds only start matches from relevant terms
+    pub relevancy: bool,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -347,6 +349,7 @@ impl<'a> CustomExternalPropagator<'a> {
         &mut self,
         allow_skolemization: bool,
         max_generation: Option<u32>,
+        relevant_only: bool,
     ) -> bool {
         debug_assert!(self.pending.is_none());
         let pending = instantiate_quantifiers(
@@ -354,6 +357,7 @@ impl<'a> CustomExternalPropagator<'a> {
             &self.assignments,
             allow_skolemization,
             max_generation,
+            relevant_only,
         );
         if pending.is_empty() {
             return false;
@@ -385,7 +389,11 @@ impl<'a> CustomExternalPropagator<'a> {
         // A new matching round requires that no earlier round (e.g. one the
         // complete-model check left partly materialized) is still pending.
         self.materialize_pending(0);
-        if self.start_quantifier_instantiation_round(false, Some(self.max_qi_generation)) {
+        if self.start_quantifier_instantiation_round(
+            false,
+            Some(self.max_qi_generation),
+            self.relevancy,
+        ) {
             self.materialize_pending(0);
         }
     }
@@ -842,7 +850,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
-        if !self.start_quantifier_instantiation_round(true, None) {
+        if !self.start_quantifier_instantiation_round(true, None, false) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.queued_clauses.borrow().is_empty());
             return true;

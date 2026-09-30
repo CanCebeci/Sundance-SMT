@@ -49,10 +49,15 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub eager_qi: bool,
     /// Largest generation of instances added by `--eager-qi` (input terms are
-    /// generation 0; an instance is one more than its bindings). Bounds matching
-    /// loops; instances above it are left to the complete-model check.
+    /// generation 0; an instance is one more than the terms its trigger matched).
+    /// Bounds matching loops; instances above it are left to the complete-model check.
     #[arg(long, default_value_t = 10)]
     pub max_qi_generation: u32,
+    /// With `--eager-qi`, only start trigger matches from relevant terms (Z3-style
+    /// relevancy over the Boolean structure of the current assignment).
+    /// Complete-model checks still match against every term.
+    #[arg(long, default_value_t = false)]
+    pub relevancy: bool,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
     /// (Simplify/Z3-style auto-trigger inference). When off (default), an
     /// untriggered `forall` panics instead.

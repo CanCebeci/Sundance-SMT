@@ -1484,6 +1484,7 @@ impl Egraph {
         assignment: &mut DeterministicHashMap<Local, u32>,
         pattern_term_pairs: &[(PatternId, Option<u32>)],
         generation: u32,
+        relevant: Option<&DeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         if pattern_term_pairs.is_empty() {
             return vec![(assignment.clone(), generation)];
@@ -1496,6 +1497,7 @@ impl Egraph {
             ground_hint,
             &pattern_term_pairs[1..].to_vec(),
             generation,
+            relevant,
         )
     }
 
@@ -1507,6 +1509,7 @@ impl Egraph {
         ground_hint: Option<u32>,
         remaining: &Vec<(PatternId, Option<u32>)>,
         generation: u32,
+        relevant: Option<&DeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         match pattern {
             Pattern::Var(name) => {
@@ -1515,19 +1518,19 @@ impl Egraph {
                     None => {
                         assignment.insert(name.clone(), ground);
 
-                        self.match_patterns(assignment, remaining, generation)
+                        self.match_patterns(assignment, remaining, generation, relevant)
                     }
                     Some(v) if self.find(*v) == self.find(ground) => {
-                        self.match_patterns(assignment, remaining, generation)
+                        self.match_patterns(assignment, remaining, generation, relevant)
                     }
                     Some(_) => vec![],
                 }
             }
             Pattern::Ground(egraph_id) => match ground_hint {
                 Some(ground) if self.find(*egraph_id) == self.find(ground) => {
-                    self.match_patterns(assignment, remaining, generation)
+                    self.match_patterns(assignment, remaining, generation, relevant)
                 }
-                None => self.match_patterns(assignment, remaining, generation),
+                None => self.match_patterns(assignment, remaining, generation, relevant),
                 _ => vec![],
             },
             Pattern::App(op, sub_patterns) => {
@@ -1539,6 +1542,7 @@ impl Egraph {
                     remaining,
                     assignment,
                     generation,
+                    relevant,
                 )
             }
         }
@@ -1553,6 +1557,7 @@ impl Egraph {
         remaining: &Vec<(PatternId, Option<u32>)>,
         assignment: &mut DeterministicHashMap<Local, u32>,
         generation: u32,
+        relevant: Option<&DeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         let function_terms = match self.function_maps.get(func_name) {
             Some(terms) => terms.clone(),
@@ -1565,6 +1570,10 @@ impl Egraph {
 
         for (i, subterms) in function_terms {
             if subterms.len() != sub_patterns.len() {
+                continue;
+            }
+            // Unpinned trigger roots only start from relevant e-nodes
+            if ground_hint.is_none() && relevant.is_some_and(|r| !r.contains(&i)) {
                 continue;
             }
 
@@ -1584,6 +1593,7 @@ impl Egraph {
                     &subterms,
                     remaining,
                     generation.max(self.generation(i)),
+                    relevant,
                 );
                 list_assignments.extend(new_assignments);
             }
@@ -1599,9 +1609,10 @@ impl Egraph {
         ground_subterms: &[u32],
         remaining: &Vec<(PatternId, Option<u32>)>,
         generation: u32,
+        relevant: Option<&DeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         if sub_patterns.is_empty() {
-            return self.match_patterns(assignment, remaining, generation);
+            return self.match_patterns(assignment, remaining, generation, relevant);
         }
         let pattern = &sub_patterns[0];
         let ground = ground_subterms[0];
@@ -1618,6 +1629,7 @@ impl Egraph {
                         rest_grounds,
                         remaining,
                         generation,
+                        relevant,
                     )
                 }
                 Some(v) if self.find(*v) == self.find(ground) => self.match_subpatterns(
@@ -1626,6 +1638,7 @@ impl Egraph {
                     rest_grounds,
                     remaining,
                     generation,
+                    relevant,
                 ),
                 Some(_) => vec![],
             },
@@ -1637,6 +1650,7 @@ impl Egraph {
                         rest_grounds,
                         remaining,
                         generation,
+                        relevant,
                     )
                 } else {
                     vec![]
@@ -1674,6 +1688,7 @@ impl Egraph {
                             &subterms,
                             &vec![],
                             generation.max(self.generation(i)),
+                            relevant,
                         );
                         for (mut sub, sub_generation) in sub_results {
                             let more = self.match_subpatterns(
@@ -1682,6 +1697,7 @@ impl Egraph {
                                 rest_grounds,
                                 remaining,
                                 sub_generation,
+                                relevant,
                             );
                             list_assignments.extend(more);
                         }
@@ -1819,9 +1835,10 @@ impl EgraphTrait for Egraph {
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+        relevant: Option<&DeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         let mut assignment = DeterministicHashMap::default();
-        self.match_patterns(&mut assignment, &trigger_term_pairs, 0)
+        self.match_patterns(&mut assignment, &trigger_term_pairs, 0, relevant)
     }
 
     fn backtrack_to(&mut self, level: usize) {

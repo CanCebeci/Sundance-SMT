@@ -155,9 +155,14 @@ pub trait EgraphTrait {
     /// Returns a list of substitution maps (bound variable `Local` → matched term ID),
     /// each with the match's generation: the largest generation among the terms
     /// the trigger's function applications matched (input terms are generation 0).
+    ///
+    /// With `relevant`, trigger patterns without a ground hint only match
+    /// function applications whose term ID is in the set; nested patterns and
+    /// hinted patterns still see the whole e-class.
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+        relevant: Option<&crate::utils::DeterministicHashSet<Self::TermId>>,
     ) -> Vec<(crate::utils::DeterministicHashMap<Local, Self::TermId>, u32)>;
 
     // --- Backtracking ---

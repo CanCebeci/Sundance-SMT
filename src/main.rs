@@ -126,6 +126,7 @@ fn main() -> Result<(), String> {
         debug_println!(12, 0, "NNF form: {}", nnf_term,);
 
         nnf_terms.push(nnf_term.clone());
+        solver_state.relevancy_roots.push((0, nnf_term.clone()));
 
         solver_state.insert_predecessor(&nnf_term, None, None, false);
 
@@ -209,6 +210,7 @@ fn main() -> Result<(), String> {
         args.batch_cap,
         args.eager_qi,
         args.max_qi_generation,
+        args.relevancy,
     );
 
     match return_value {

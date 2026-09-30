@@ -10,9 +10,11 @@ use std::rc::Rc;
 use crate::arithmetic::simplify::ArithSimplify;
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
+use crate::log::trace_decisions;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
+use crate::relevancy::relevant_enodes;
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
 use crate::utils::DeterministicHashMap;
@@ -78,9 +80,23 @@ pub(crate) fn instantiate_quantifiers(
     assignments: &[i32],
     allow_skolemization: bool,
     max_generation: Option<u32>,
+    relevant_only: bool,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
+    // With `relevant_only`, trigger matches only start from relevant e-nodes
+    let relevant: Option<std::collections::BTreeSet<u32>> = relevant_only.then(|| relevant_enodes(solver_state, assignments));
+    if let Some(relevant) = &relevant
+        && trace_decisions()
+    {
+        // eprintln!("[relevancy] {} relevant e-nodes", relevant.len());
+        // let mut ids: Vec<u32> = relevant.iter().copied().collect();
+        // ids.sort_unstable();
+        // for id in ids {
+        //     let term = solver_state.get_term(solver_state.to_solver_uid(id));
+        //     eprintln!("[relevancy]   #{id}: {term}");
+        // }
+    }
     let quantifiers = &solver_state.quantifiers.clone();
     let mut skolemized_quantifier_idxs = vec![];
     let mut deferred_skolemizations: VecDeque<DeferredSkolemization> = VecDeque::new();
@@ -149,7 +165,9 @@ pub(crate) fn instantiate_quantifiers(
             let trigger_term_pairs: Vec<(usize, Option<u32>)> =
                 multipattern.iter().map(|t| (*t, None)).collect();
 
-            let list_assignments = solver_state.egraph.match_triggers(trigger_term_pairs);
+            let list_assignments = solver_state
+                .egraph
+                .match_triggers(trigger_term_pairs, relevant.as_ref());
 
             if list_assignments.is_empty() {
                 continue;
@@ -270,6 +288,9 @@ fn process_deferred_skolemizations(
         debug_println!(26, 0, "(assert {})", reduced_skolem);
 
         let quantifier_dimacs_literal = if is_exists { literal } else { -literal };
+        solver_state
+            .relevancy_roots
+            .push((quantifier_dimacs_literal, reduced_skolem.clone()));
         let reduced_skolem_literal = solver_state.get_lit_from_term(&reduced_skolem);
         // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
         let skolem_literal = if skolem.uid() != reduced_skolem.uid() {
@@ -381,6 +402,9 @@ fn process_deferred_instantiations(
             .collect();
 
         let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
+        solver_state
+            .relevancy_roots
+            .push((quantifier_dimacs_literal, nnf_term.clone()));
         let nnf_term_literal = solver_state.get_lit_from_term(&nnf_term);
         // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first.
         // The un-reduced instance only appears in the proof, so unless it already
