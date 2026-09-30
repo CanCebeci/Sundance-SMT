@@ -85,17 +85,18 @@ pub(crate) fn instantiate_quantifiers(
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
     // With `relevant_only`, trigger matches only start from relevant e-nodes
-    let relevant: Option<std::collections::BTreeSet<u32>> = relevant_only.then(|| relevant_enodes(solver_state, assignments));
+    let relevant: Option<std::collections::BTreeSet<u32>> =
+        relevant_only.then(|| relevant_enodes(solver_state, assignments));
     if let Some(relevant) = &relevant
         && trace_decisions()
     {
-        // eprintln!("[relevancy] {} relevant e-nodes", relevant.len());
-        // let mut ids: Vec<u32> = relevant.iter().copied().collect();
-        // ids.sort_unstable();
-        // for id in ids {
-        //     let term = solver_state.get_term(solver_state.to_solver_uid(id));
-        //     eprintln!("[relevancy]   #{id}: {term}");
-        // }
+        eprintln!("[relevancy] {} relevant e-nodes", relevant.len());
+        let mut ids: Vec<u32> = relevant.iter().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let term = solver_state.get_term(solver_state.to_solver_uid(id));
+            eprintln!("[relevancy]   #{id}: {term}");
+        }
     }
     let quantifiers = &solver_state.quantifiers.clone();
     let mut skolemized_quantifier_idxs = vec![];

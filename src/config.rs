@@ -58,6 +58,12 @@ pub struct Args {
     /// Complete-model checks still match against every term.
     #[arg(long, default_value_t = false)]
     pub relevancy: bool,
+    /// Split input assertions into clauses like Z3's `flatten_clauses`, distributing
+    /// disjunctions over unshared conjunctions. The flattened clauses are not justified
+    /// in `--proof`/`--partial-proof` output, so proofs might not check (Z3 skips it when
+    /// proofs are enabled).
+    #[arg(long, default_value_t = false)]
+    pub flatten_clauses: bool,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
     /// (Simplify/Z3-style auto-trigger inference). When off (default), an
     /// untriggered `forall` panics instead.

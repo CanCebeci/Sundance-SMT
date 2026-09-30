@@ -7,6 +7,7 @@ use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
+use sundance_smt::flatten::{ParentCounts, flatten_clauses};
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
 use sundance_smt::theory_check::{NonlinearityCheck, reject_unsupported_theories};
@@ -102,7 +103,7 @@ fn main() -> Result<(), String> {
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
-    let mut nnf_terms = vec![];
+    let mut input_nnf_terms = vec![];
     // Non-linear multiplication is the other input the solver cannot handle, and the arithmetic
     // frontend reports it by panicking from inside a CaDiCaL callback, where cxx turns the panic
     // into `abort()`. Catching it here instead keeps it a clean error. The check has to see the
@@ -125,28 +126,50 @@ fn main() -> Result<(), String> {
         let nnf_term = skolemized_term.nnf(&mut solver_state);
         debug_println!(12, 0, "NNF form: {}", nnf_term,);
 
-        nnf_terms.push(nnf_term.clone());
-        solver_state.relevancy_roots.push((0, nnf_term.clone()));
+        input_nnf_terms.push(nnf_term);
+    }
 
-        solver_state.insert_predecessor(&nnf_term, None, None, false);
-
-        debug_println!(4, 0, "We have the nnf term {}", nnf_term);
-
-        // Convert to CNF (Conjunctive Normal Form) using Sundance implementation
-        // using tseitin transformation because if we have (and true b), we
-        // want (and true b) <-> true \land b, not just the forwards direction
-        let cnf_formula = nnf_term.cnf_tseitin(&mut solver_state);
-
-        debug_println!(4, 0, "We have the cnf formula {}", cnf_formula);
-
-        debug_println!(4, 0, "CNF formula: {:?}", cnf_formula);
-
-        prop_skeleton.extend(
-            cnf_formula
-                .clone()
-                .into_iter()
-                .map(|x| x.into_iter().collect::<Vec<_>>()),
+    // Clause flattening needs the parent counts of the whole input before splitting anything
+    if args.flatten_clauses && (args.proof.is_some() || args.partial_proof.is_some()) {
+        eprintln!(
+            "Warning: --flatten-clauses with --proof/--partial-proof: the flattened clauses are \
+             not justified in the proof, so it might not check"
         );
+    }
+    let parent_counts = args
+        .flatten_clauses
+        .then(|| ParentCounts::new(&input_nnf_terms));
+
+    let mut nnf_terms = vec![];
+    for input_nnf_term in input_nnf_terms {
+        let clauses = match &parent_counts {
+            Some(counts) => flatten_clauses(&input_nnf_term, counts, &mut solver_state.context),
+            None => vec![input_nnf_term],
+        };
+        for nnf_term in clauses {
+            nnf_terms.push(nnf_term.clone());
+            solver_state.relevancy_roots.push((0, nnf_term.clone()));
+
+            solver_state.insert_predecessor(&nnf_term, None, None, false);
+
+            debug_println!(4, 0, "We have the nnf term {}", nnf_term);
+
+            // Convert to CNF (Conjunctive Normal Form) using Sundance implementation
+            // using tseitin transformation because if we have (and true b), we
+            // want (and true b) <-> true \land b, not just the forwards direction
+            let cnf_formula = nnf_term.cnf_tseitin(&mut solver_state);
+
+            debug_println!(4, 0, "We have the cnf formula {}", cnf_formula);
+
+            debug_println!(4, 0, "CNF formula: {:?}", cnf_formula);
+
+            prop_skeleton.extend(
+                cnf_formula
+                    .clone()
+                    .into_iter()
+                    .map(|x| x.into_iter().collect::<Vec<_>>()),
+            );
+        }
     }
 
     // save the sorts and symbol table for the proof file
