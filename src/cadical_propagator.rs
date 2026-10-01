@@ -4,7 +4,9 @@
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 #[cfg(feature = "z3-solver")]
-use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
+use crate::arithmetic::z3incremental::{
+    PARTIAL_CHECK_ASSERTION_BATCH, PartialCheckResult, Z3IncrementalState,
+};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
@@ -65,11 +67,11 @@ pub struct CustomExternalPropagator<'a> {
 
 impl<'a> CustomExternalPropagator<'a> {
     #[cfg(feature = "z3-solver")]
-    fn check_partial_arithmetic_trail(&mut self) {
+    fn check_partial_arithmetic_trail(&mut self, min_pending: usize) {
         let Some(z3) = self.z3_incremental.as_mut() else {
             return;
         };
-        match z3.check_partial_trail() {
+        match z3.check_partial_trail(min_pending) {
             PartialCheckResult::Unchanged => {}
             PartialCheckResult::Sat => {
                 self.stats.arith_checks += 1;
@@ -537,7 +539,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         #[cfg(feature = "z3-solver")]
-        self.check_partial_arithmetic_trail();
+        self.check_partial_arithmetic_trail(PARTIAL_CHECK_ASSERTION_BATCH);
     }
 
     fn notify_new_decision_level(&mut self) {
@@ -912,7 +914,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             is_forgettable
         );
         // CaDiCaL asks until the queue is empty before deciding, so this is the
-        // last point to add instances for the current assignment.
+        // last point to add instances for the current assignment. Check the
+        // arithmetic trail first so no instances are added on a branch that is
+        // already theory-inconsistent.
+        #[cfg(feature = "z3-solver")]
+        if self.eager_qi && self.queued_clauses.borrow().is_empty() {
+            self.check_partial_arithmetic_trail(1);
+        }
         if self.queued_clauses.borrow().is_empty() {
             self.eagerly_instantiate_quantifiers();
         }
