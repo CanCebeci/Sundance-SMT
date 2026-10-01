@@ -162,7 +162,7 @@ pub trait EgraphTrait {
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
-        relevant: Option<&crate::utils::DeterministicHashSet<Self::TermId>>,
+        relevant: Option<&crate::utils::FastDeterministicHashSet<Self::TermId>>,
     ) -> Vec<(crate::utils::DeterministicHashMap<Local, Self::TermId>, u32)>;
 
     // --- Backtracking ---

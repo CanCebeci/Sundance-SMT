@@ -1484,7 +1484,7 @@ impl Egraph {
         assignment: &mut DeterministicHashMap<Local, u32>,
         pattern_term_pairs: &[(PatternId, Option<u32>)],
         generation: u32,
-        relevant: Option<&DeterministicHashSet<u32>>,
+        relevant: Option<&FastDeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         if pattern_term_pairs.is_empty() {
             return vec![(assignment.clone(), generation)];
@@ -1509,7 +1509,7 @@ impl Egraph {
         ground_hint: Option<u32>,
         remaining: &Vec<(PatternId, Option<u32>)>,
         generation: u32,
-        relevant: Option<&DeterministicHashSet<u32>>,
+        relevant: Option<&FastDeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         match pattern {
             Pattern::Var(name) => {
@@ -1557,7 +1557,7 @@ impl Egraph {
         remaining: &Vec<(PatternId, Option<u32>)>,
         assignment: &mut DeterministicHashMap<Local, u32>,
         generation: u32,
-        relevant: Option<&DeterministicHashSet<u32>>,
+        relevant: Option<&FastDeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         let function_terms = match self.function_maps.get(func_name) {
             Some(terms) => terms.clone(),
@@ -1609,7 +1609,7 @@ impl Egraph {
         ground_subterms: &[u32],
         remaining: &Vec<(PatternId, Option<u32>)>,
         generation: u32,
-        relevant: Option<&DeterministicHashSet<u32>>,
+        relevant: Option<&FastDeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         if sub_patterns.is_empty() {
             return self.match_patterns(assignment, remaining, generation, relevant);
@@ -1835,7 +1835,7 @@ impl EgraphTrait for Egraph {
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
-        relevant: Option<&DeterministicHashSet<u32>>,
+        relevant: Option<&FastDeterministicHashSet<u32>>,
     ) -> Vec<(DeterministicHashMap<Local, u32>, u32)> {
         let mut assignment = DeterministicHashMap::default();
         self.match_patterns(&mut assignment, &trigger_term_pairs, 0, relevant)

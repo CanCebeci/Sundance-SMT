@@ -104,7 +104,7 @@ pub fn cdcl_decision_procedure(
         pending: None,
         eager_qi,
         max_qi_generation,
-        relevancy,
+        relevancy: relevancy.then(crate::relevancy::Relevancy::new),
         materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,

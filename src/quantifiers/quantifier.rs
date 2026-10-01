@@ -14,10 +14,9 @@ use crate::log::trace_relevancy;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
-use crate::relevancy::relevant_enodes;
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, FastDeterministicHashSet};
 
 use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
@@ -80,14 +79,12 @@ pub(crate) fn instantiate_quantifiers(
     assignments: &[i32],
     allow_skolemization: bool,
     max_generation: Option<u32>,
-    relevant_only: bool,
+    relevant: Option<&FastDeterministicHashSet<u32>>,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
-    // With `relevant_only`, trigger matches only start from relevant e-nodes
-    let relevant: Option<std::collections::BTreeSet<u32>> =
-        relevant_only.then(|| relevant_enodes(solver_state, assignments));
-    if let Some(relevant) = &relevant
+    // With `relevant`, trigger matches only start from relevant e-nodes
+    if let Some(relevant) = relevant
         && trace_relevancy()
     {
         eprintln!("[relevancy] {} relevant e-nodes", relevant.len());
@@ -168,7 +165,7 @@ pub(crate) fn instantiate_quantifiers(
 
             let list_assignments = solver_state
                 .egraph
-                .match_triggers(trigger_term_pairs, relevant.as_ref());
+                .match_triggers(trigger_term_pairs, relevant);
 
             if list_assignments.is_empty() {
                 continue;

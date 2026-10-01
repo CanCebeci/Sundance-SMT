@@ -14,6 +14,7 @@ use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemiz
 use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
+use crate::relevancy::Relevancy;
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -37,8 +38,8 @@ pub struct CustomExternalPropagator<'a> {
     pub eager_qi: bool,
     /// Largest instance generation eager rounds may add (complete-model rounds are unlimited)
     pub max_qi_generation: u32,
-    /// Eager rounds only start matches from relevant terms
-    pub relevancy: bool,
+    /// Eager rounds only start matches from relevant terms (Some iff `--relevancy`)
+    pub relevancy: Option<Relevancy>,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -352,12 +353,19 @@ impl<'a> CustomExternalPropagator<'a> {
         relevant_only: bool,
     ) -> bool {
         debug_assert!(self.pending.is_none());
+        let relevant = match &mut self.relevancy {
+            Some(relevancy) if relevant_only => {
+                relevancy.sync_roots(self.solver_state, &self.assignments);
+                Some(relevancy.enodes())
+            }
+            _ => None,
+        };
         let pending = instantiate_quantifiers(
             self.solver_state,
             &self.assignments,
             allow_skolemization,
             max_generation,
-            relevant_only,
+            relevant,
         );
         if pending.is_empty() {
             return false;
@@ -389,11 +397,7 @@ impl<'a> CustomExternalPropagator<'a> {
         // A new matching round requires that no earlier round (e.g. one the
         // complete-model check left partly materialized) is still pending.
         self.materialize_pending(0);
-        if self.start_quantifier_instantiation_round(
-            false,
-            Some(self.max_qi_generation),
-            self.relevancy,
-        ) {
+        if self.start_quantifier_instantiation_round(false, Some(self.max_qi_generation), true) {
             self.materialize_pending(0);
         }
     }
@@ -536,6 +540,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
+        if let Some(relevancy) = &mut self.relevancy {
+            relevancy.on_assignments(lits, self.solver_state, &self.assignments);
+        }
+
         #[cfg(feature = "z3-solver")]
         self.check_partial_arithmetic_trail();
     }
@@ -560,6 +568,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.solver_state.hash_at_level[self.decision_level] = self.solver_state.current_hash;
 
         self.solver_state.egraph.notify_new_decision_level();
+        if let Some(relevancy) = &mut self.relevancy {
+            relevancy.new_decision_level();
+        }
 
         #[cfg(feature = "z3-solver")]
         if let Some(z3) = self.z3_incremental.as_mut() {
@@ -602,6 +613,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
+        if let Some(relevancy) = &mut self.relevancy {
+            relevancy.backtrack(level, self.solver_state, &self.assignments);
+        }
 
         #[cfg(feature = "z3-solver")]
         {
