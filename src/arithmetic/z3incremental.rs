@@ -34,7 +34,7 @@ pub(crate) enum PartialCheckResult {
     Unsat(Vec<i32>),
 }
 
-pub(crate) const PARTIAL_CHECK_ASSERTION_BATCH: usize = 32;
+const PARTIAL_CHECK_ASSERTION_BATCH: usize = 32;
 
 fn ibig_to_bigint(n: &IBig) -> num::BigInt {
     num::BigInt::parse_bytes(n.to_string().as_bytes(), 10).unwrap()
@@ -354,11 +354,9 @@ impl Z3IncrementalState {
     }
 
     /// Check only the current tracked arithmetic trail, without constructing
-    /// a model or inspecting any non-arithmetic query formula. Skipped unless
-    /// at least `min_pending` (and at least one) assertions arrived since the
-    /// last check.
-    pub(crate) fn check_partial_trail(&mut self, min_pending: usize) -> PartialCheckResult {
-        if self.pending_partial_assertions < min_pending.max(1) {
+    /// a model or inspecting any non-arithmetic query formula.
+    pub(crate) fn check_partial_trail(&mut self) -> PartialCheckResult {
+        if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
             return PartialCheckResult::Unchanged;
         }
         self.pending_partial_assertions = 0;
