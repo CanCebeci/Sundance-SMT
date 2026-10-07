@@ -89,6 +89,19 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
+    /// Theory work run before CaDiCaL takes queued clauses: check the
+    /// arithmetic trail, then instantiate quantifiers if that queued nothing.
+    fn propagate(&mut self) {
+        #[cfg(feature = "z3-solver")]
+        self.check_partial_arithmetic_trail();
+
+        // CaDiCaL asks until the queue is empty before deciding, so this is the
+        // last point to add instances for the current assignment.
+        if self.queued_clauses.borrow().is_empty() {
+            self.eagerly_instantiate_quantifiers();
+        }
+    }
+
     /// Stream one refuted model as a `t <signed lits>` line. A write error is
     /// reported once then the writer is dropped; it must never abort the solve.
     fn write_trail_line(&mut self, model: &[i32]) {
@@ -922,14 +935,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
-        #[cfg(feature = "z3-solver")]
-        self.check_partial_arithmetic_trail();
-
-        // CaDiCaL asks until the queue is empty before deciding, so this is the
-        // last point to add instances for the current assignment.
-        if self.queued_clauses.borrow().is_empty() {
-            self.eagerly_instantiate_quantifiers();
-        }
+        self.propagate();
         if (*self.queued_clauses.borrow_mut()).is_empty() {
             false
         } else {
