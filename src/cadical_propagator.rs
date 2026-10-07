@@ -543,9 +543,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if let Some(relevancy) = &mut self.relevancy {
             relevancy.on_assignments(lits, self.solver_state, &self.assignments);
         }
-
-        #[cfg(feature = "z3-solver")]
-        self.check_partial_arithmetic_trail();
     }
 
     fn notify_new_decision_level(&mut self) {
@@ -925,6 +922,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
+        #[cfg(feature = "z3-solver")]
+        self.check_partial_arithmetic_trail();
+
         // CaDiCaL asks until the queue is empty before deciding, so this is the
         // last point to add instances for the current assignment.
         if self.queued_clauses.borrow().is_empty() {
