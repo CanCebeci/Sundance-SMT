@@ -14,6 +14,7 @@ use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::arithmetic::lp::{ArithResult, Coefficient, FunctionType, LinearConstraint};
 use crate::debug_println;
 use crate::egraphs::traits::EgraphTrait;
+use crate::log::trace_z3_queries;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::Integer;
@@ -70,6 +71,8 @@ pub struct Z3IncrementalState {
     current_level: usize,
     /// Tracked arithmetic assertions added since the last arithmetic check.
     pending_partial_assertions: usize,
+    /// Checks run so far, numbering the `--trace-z3-queries` log.
+    checks: usize,
 }
 
 impl Z3IncrementalState {
@@ -85,6 +88,7 @@ impl Z3IncrementalState {
             vars_by_level: vec![Vec::new()],
             current_level: 0,
             pending_partial_assertions: 0,
+            checks: 0,
         }
     }
 
@@ -353,12 +357,51 @@ impl Z3IncrementalState {
         lits.into_iter().collect()
     }
 
+    /// Run `check_assumptions` under the currently-active trackers. With
+    /// `--trace-z3-queries`, log the query as SMT-LIB2 before the check, and
+    /// its result with Z3's cumulative bound counts after it.
+    fn check_active(&mut self, kind: &str) -> SatResult {
+        let assumptions = self.active_assumptions();
+        self.checks += 1;
+        if trace_z3_queries() {
+            let names: Vec<String> = assumptions.iter().map(|a| a.to_string()).collect();
+            eprintln!(
+                "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
+                self.checks,
+                self.current_level,
+                self.solver,
+                names.join(" ")
+            );
+        }
+        let result = self.solver.check_assumptions(&assumptions);
+        if trace_z3_queries() {
+            let stats = self.solver.get_statistics();
+            // Z3 leaves a counter out until it is nonzero
+            let count = |key: &str| match stats.value(key) {
+                Some(z3::StatisticsValue::UInt(n)) => n,
+                _ => 0,
+            };
+            let result_name = match result {
+                SatResult::Sat => "sat",
+                SatResult::Unsat => "unsat",
+                SatResult::Unknown => "unknown",
+            };
+            eprintln!(
+                "; z3 {kind} check {} result {result_name} arith-lower={} arith-upper={}",
+                self.checks,
+                count("arith-lower"),
+                count("arith-upper")
+            );
+        }
+        result
+    }
+
     /// Check only the current tracked arithmetic trail, without constructing
     /// a model or inspecting any non-arithmetic query formula.
     pub(crate) fn check_partial_trail(&mut self) -> PartialCheckResult {
-        if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
-            return PartialCheckResult::Unchanged;
-        }
+        // if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
+        //     return PartialCheckResult::Unchanged;
+        // }
         self.pending_partial_assertions = 0;
 
         debug_println!(
@@ -367,7 +410,7 @@ impl Z3IncrementalState {
             "[z3inc] partial check at level {}",
             self.current_level
         );
-        match self.solver.check_assumptions(&self.active_assumptions()) {
+        match self.check_active("partial") {
             SatResult::Sat => PartialCheckResult::Sat,
             SatResult::Unsat => PartialCheckResult::Unsat(self.unsat_core_clause()),
             SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
@@ -387,7 +430,7 @@ impl Z3IncrementalState {
             let _ = self.var_for(egraph_id, solver_state);
         }
         self.pending_partial_assertions = 0;
-        match self.solver.check_assumptions(&self.active_assumptions()) {
+        match self.check_active("final") {
             SatResult::Sat => {
                 let model = self.solver.get_model().unwrap();
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =

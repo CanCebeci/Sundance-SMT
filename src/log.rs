@@ -40,6 +40,17 @@ pub fn trace_relevancy() -> bool {
     TRACE_RELEVANCY.load(Ordering::Relaxed)
 }
 
+/// Whether to log the Z3 query of each partial arithmetic check
+static TRACE_Z3_QUERIES: AtomicBool = AtomicBool::new(false);
+
+pub fn set_trace_z3_queries(enabled: bool) {
+    TRACE_Z3_QUERIES.store(enabled, Ordering::SeqCst);
+}
+
+pub fn trace_z3_queries() -> bool {
+    TRACE_Z3_QUERIES.load(Ordering::Relaxed)
+}
+
 /// Debug macro -> used to print debug statements
 #[macro_export]
 macro_rules! debug_println {

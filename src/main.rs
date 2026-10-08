@@ -34,6 +34,7 @@ fn main() -> Result<(), String> {
 
     log::set_trace_decisions(args.trace_decisions);
     log::set_trace_relevancy(args.trace_relevancy);
+    log::set_trace_z3_queries(args.trace_z3_queries);
 
     // Parse debug flag and level
     if args.debug > 0 {
