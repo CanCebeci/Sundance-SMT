@@ -3,8 +3,11 @@
 
 //! Incremental Z3 arithmetic backend.
 //!
-//! Keeps a persistent `z3::Solver` in sync with CaDiCaL's trail: each
-//! arithmetic literal is asserted via `assert_and_track` so its abs-lit
+//! Keeps a persistent `z3::Solver` in sync with CaDiCaL's trail, separating
+//! internalization from assignment: before the search, every arithmetic term
+//! of the input gets a Z3 `Int` var whose definition is asserted at level 0.
+//! An arithmetic literal `(op t1 t2)` is then asserted as `var_t1 op var_t2`
+//! when it is assigned, via `assert_and_track` so its abs-lit
 //! recovers from an unsat core, and each egraph merge is asserted as
 //! `var_a == var_b` under the SAT lit produced by `make_eq(a, b)`.
 //! Each decision level has its own Z3 scope, popped when CaDiCaL backtracks
@@ -14,7 +17,7 @@
 //! definitional pinnings are stable across backtracks.
 
 use crate::arithmetic::lia::stats::Stats as LiaStats;
-use crate::arithmetic::lp::{ArithResult, Coefficient, FunctionType, LinearConstraint};
+use crate::arithmetic::lp::{ArithResult, Coefficient, FunctionType};
 use crate::debug_println;
 use crate::egraphs::traits::EgraphTrait;
 use crate::log::trace_z3_queries;
@@ -172,35 +175,16 @@ impl Z3IncrementalState {
         }
     }
 
-    fn constraint_to_z3(&mut self, c: &LinearConstraint, solver_state: &mut SolverState) -> Bool {
-        let mut left = Int::from_i64(0);
-        for (k, v) in &c.left_expr {
-            if let Some(e) = self.coeff_to_z3(k, v, solver_state) {
-                left += e;
-            }
-        }
-        let mut right = Int::from_i64(0);
-        for (k, v) in &c.right_expr {
-            if let Some(e) = self.coeff_to_z3(k, v, solver_state) {
-                right += e;
-            }
-        }
-        match c.function {
-            FunctionType::Leq => Int::le(&left, &right),
-            FunctionType::Lt => Int::lt(&left, &right),
-            FunctionType::Eq => Int::eq(&left, right),
-        }
-    }
-
-    /// Build a LinearConstraint for a signed SAT literal, or None if the
-    /// underlying term isn't an arithmetic inequality. Equality atoms are
+    /// For a signed SAT literal `(op t1 t2)` that is an arithmetic inequality,
+    /// the egraph ids of the sides and the comparison between them, as
+    /// `(left, right, Leq | Lt)`; None otherwise. Equality atoms are
     /// intentionally rejected — the egraph is the single source of truth for
     /// equalities (positive → merges via `drain_merge_queue`; negative →
     /// egraph disequalities).
     fn extract_lazy_constraint(
         lit: i32,
         solver_state: &mut SolverState,
-    ) -> Option<LinearConstraint> {
+    ) -> Option<(u32, u32, FunctionType)> {
         let (term_id, polarity) = solver_state.get_u64_from_lit_with_polarity(lit);
         let term = solver_state.get_term(term_id);
         let (term, polarity) = match term.repr() {
@@ -213,20 +197,37 @@ impl Z3IncrementalState {
         if args.len() != 2 {
             return None;
         }
-        let left_expr = extract_lazy_expression(args[0].uid(), solver_state)?;
-        let right_expr = extract_lazy_expression(args[1].uid(), solver_state)?;
-        let (le, re, func) = match (identifier.0.symbol.as_str(), polarity) {
-            ("<=", true) => (left_expr, right_expr, FunctionType::Leq),
-            ("<=", false) => (right_expr, left_expr, FunctionType::Lt),
-            (">=", true) => (right_expr, left_expr, FunctionType::Leq),
-            (">=", false) => (left_expr, right_expr, FunctionType::Lt),
-            ("<", true) => (left_expr, right_expr, FunctionType::Lt),
-            ("<", false) => (right_expr, left_expr, FunctionType::Leq),
-            (">", true) => (right_expr, left_expr, FunctionType::Lt),
-            (">", false) => (left_expr, right_expr, FunctionType::Leq),
+        // Only sides that are linear arithmetic make an arithmetic literal
+        extract_lazy_expression(args[0].uid(), solver_state)?;
+        extract_lazy_expression(args[1].uid(), solver_state)?;
+        let left = solver_state.to_egraph_id(args[0].uid());
+        let right = solver_state.to_egraph_id(args[1].uid());
+        let atom = match (identifier.0.symbol.as_str(), polarity) {
+            ("<=", true) => (left, right, FunctionType::Leq),
+            ("<=", false) => (right, left, FunctionType::Lt),
+            (">=", true) => (right, left, FunctionType::Leq),
+            (">=", false) => (left, right, FunctionType::Lt),
+            ("<", true) => (left, right, FunctionType::Lt),
+            ("<", false) => (right, left, FunctionType::Leq),
+            (">", true) => (right, left, FunctionType::Lt),
+            (">", false) => (left, right, FunctionType::Leq),
             _ => return None,
         };
-        Some(LinearConstraint::new(le, re, func, vec![]))
+        Some(atom)
+    }
+
+    /// Internalize every arithmetic term known before the search: create its
+    /// Z3 var and assert its definition at level 0, outside every scope, so
+    /// that no backtrack removes it. Terms that appear later, e.g. in
+    /// quantifier instances, are internalized when first used, at the
+    /// current level.
+    pub fn internalize_terms(&mut self, solver_state: &mut SolverState) {
+        debug_assert_eq!(self.current_level(), 0);
+        let arithmetic_terms = solver_state.arithmetic_terms.clone();
+        for term_id in &arithmetic_terms {
+            let egraph_id = solver_state.to_egraph_id(*term_id);
+            let _ = self.var_for(egraph_id, solver_state);
+        }
     }
 
     /// Open the new level's scope. The lits queued at the level below are
@@ -285,11 +286,17 @@ impl Z3IncrementalState {
         if self.non_arithmetic_lits.contains(&abs_lit) || self.active_lits.contains(&lit) {
             return;
         }
-        let Some(constraint) = Self::extract_lazy_constraint(lit, solver_state) else {
+        let Some((left, right, func)) = Self::extract_lazy_constraint(lit, solver_state) else {
             self.non_arithmetic_lits.insert(abs_lit);
             return;
         };
-        let ast = self.constraint_to_z3(&constraint, solver_state);
+        let left = self.var_for(left, solver_state);
+        let right = self.var_for(right, solver_state);
+        let ast = match func {
+            FunctionType::Leq => Int::le(&left, &right),
+            FunctionType::Lt => Int::lt(&left, &right),
+            FunctionType::Eq => unreachable!("equality atoms are not arithmetic literals"),
+        };
         self.queue(lit, ast);
         debug_println!(
             21,

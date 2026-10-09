@@ -88,8 +88,11 @@ pub fn cdcl_decision_procedure(
         .incremental_arithmetic(using_z3_incremental);
 
     #[cfg(feature = "z3-solver")]
-    let z3_incremental =
-        using_z3_incremental.then(crate::arithmetic::z3incremental::Z3IncrementalState::new);
+    let z3_incremental = using_z3_incremental.then(|| {
+        let mut z3 = crate::arithmetic::z3incremental::Z3IncrementalState::new();
+        z3.internalize_terms(solver_state);
+        z3
+    });
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
