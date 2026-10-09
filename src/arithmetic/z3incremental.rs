@@ -327,13 +327,6 @@ impl Z3IncrementalState {
         new_lits
     }
 
-    fn active_assumptions(&self) -> Vec<Bool> {
-        self.active_lits
-            .iter()
-            .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
-            .collect()
-    }
-
     fn unsat_core_clause(&self) -> Vec<i32> {
         let lits: DeterministicHashSet<i32> = self
             .solver
@@ -357,14 +350,19 @@ impl Z3IncrementalState {
         lits.into_iter().collect()
     }
 
-    /// Run `check_assumptions` under the currently-active trackers. With
+    /// Check the tracked assertions; `assert_and_track` already makes Z3
+    /// assume the trackers of the scopes still open, so none are passed. With
     /// `--trace-z3-queries`, log the query as SMT-LIB2 before the check, and
     /// its result with Z3's cumulative bound counts after it.
     fn check_active(&mut self, kind: &str) -> SatResult {
-        let assumptions = self.active_assumptions();
         self.checks += 1;
         if trace_z3_queries() {
-            // let names: Vec<String> = assumptions.iter().map(|a| a.to_string()).collect();
+            // let names: Vec<String> = self
+            //     .active_lits
+            //     .iter()
+            //     .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()))
+            //     .map(|a| a.to_string())
+            //     .collect();
             // eprintln!(
             //     "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
             //     self.checks,
@@ -373,7 +371,7 @@ impl Z3IncrementalState {
             //     names.join(" ")
             // );
         }
-        let result = self.solver.check_assumptions(&assumptions);
+        let result = self.solver.check();
         if trace_z3_queries() {
             let stats = self.solver.get_statistics();
             // Z3 leaves a counter out until it is nonzero
@@ -417,7 +415,7 @@ impl Z3IncrementalState {
         }
     }
 
-    /// Run `check_assumptions` under the currently-active trackers. On SAT,
+    /// Check the tracked assertions. On SAT,
     /// bucket each arithmetic term whose egraph id is its own class root by
     /// model value for the caller's Nelson-Oppen probe. On UNSAT, recover
     /// the SAT lits from the unsat core.
