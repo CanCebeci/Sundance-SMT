@@ -81,6 +81,9 @@ pub struct Z3IncrementalState {
     /// Lits assigned at the current level since the last check, with their
     /// constraints, in assignment order. Asserted by `flush_queued`.
     queued: Vec<(i32, Bool)>,
+    /// Whether lits were queued or scopes popped since the last check, i.e.
+    /// whether the next check could be any different from the last one.
+    changed_since_check: bool,
     /// Tracked arithmetic assertions added since the last arithmetic check.
     pending_partial_assertions: usize,
     /// Checks run so far, numbering the `--trace-z3-queries` log.
@@ -97,6 +100,7 @@ impl Z3IncrementalState {
             active_lits: DeterministicHashSet::default(),
             levels: vec![Level::default()],
             queued: Vec::new(),
+            changed_since_check: false,
             pending_partial_assertions: 0,
             checks: 0,
         }
@@ -240,6 +244,7 @@ impl Z3IncrementalState {
             return;
         }
         self.queued.clear();
+        self.changed_since_check = true;
         self.solver.pop((self.current_level() - level) as u32);
         for popped in self.levels.drain(level + 1..) {
             for lit in popped.lits {
@@ -261,6 +266,7 @@ impl Z3IncrementalState {
         self.active_lits.insert(lit);
         self.top_level().lits.push(lit);
         self.queued.push((lit, ast));
+        self.changed_since_check = true;
         self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
     }
 
@@ -358,6 +364,7 @@ impl Z3IncrementalState {
     /// cumulative bound counts after it.
     fn check_active(&mut self, kind: &str) -> SatResult {
         self.flush_queued();
+        self.changed_since_check = false;
         self.checks += 1;
         if trace_z3_queries() {
             // let names: Vec<String> = self
@@ -403,6 +410,10 @@ impl Z3IncrementalState {
         // if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
         //     return PartialCheckResult::Unchanged;
         // }
+        // Nothing to learn from repeating the last query
+        if !self.changed_since_check {
+            return PartialCheckResult::Unchanged;
+        }
         self.pending_partial_assertions = 0;
 
         debug_println!(
