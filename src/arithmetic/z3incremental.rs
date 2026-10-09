@@ -4,9 +4,12 @@
 //! Incremental Z3 arithmetic backend.
 //!
 //! Keeps a persistent `z3::Solver` in sync with CaDiCaL's trail: each
-//! arithmetic literal is pushed via `assert_and_track` so its abs-lit
+//! arithmetic literal is asserted via `assert_and_track` so its abs-lit
 //! recovers from an unsat core, and each egraph merge is asserted as
 //! `var_a == var_b` under the SAT lit produced by `make_eq(a, b)`.
+//! Each decision level has its own Z3 scope, popped when CaDiCaL backtracks
+//! below it. Assigned literals are queued and asserted together in their
+//! level's scope before the next check or decision.
 //! Z3 `Int` vars are keyed by raw egraph id (not union-find root), so
 //! definitional pinnings are stable across backtracks.
 
@@ -50,6 +53,16 @@ fn parse_z3_model_int(s: &str) -> IBig {
     }
 }
 
+/// What a decision level added, undone when CaDiCaL backtracks below it.
+#[derive(Default)]
+struct Level {
+    /// Lits assigned at this level, removed from `active_lits` on backtrack.
+    lits: Vec<i32>,
+    /// Egraph ids materialized at this level, whose definitions are in its
+    /// scope; evicted from `var_map` on backtrack.
+    vars: Vec<u32>,
+}
+
 pub struct Z3IncrementalState {
     solver: Solver,
     var_map: DeterministicHashMap<u32, Int>,
@@ -59,16 +72,15 @@ pub struct Z3IncrementalState {
     tracker_by_abs_lit: DeterministicHashMap<i32, Bool>,
     /// Abs-lits already known to be non-arithmetic; skip re-parsing.
     non_arithmetic_lits: DeterministicHashSet<i32>,
-    /// Signed lits currently in Z3's scope. Guards against duplicate pushes
-    /// when CaDiCaL re-notifies a literal at the same level.
+    /// Signed lits on the trail, asserted or queued. Guards against duplicate
+    /// assertions when CaDiCaL re-notifies a literal at the same level.
     active_lits: DeterministicHashSet<i32>,
-    /// Per-level record of pushed lits, mirrored on backtrack.
-    lits_by_level: Vec<Vec<i32>>,
-    /// Per-level `z3::push` count, popped on backtrack.
-    push_counts: Vec<u32>,
-    /// Egraph ids materialized per level; evicted from `var_map` on backtrack.
-    vars_by_level: Vec<Vec<u32>>,
-    current_level: usize,
+    /// One entry per decision level, from level 0 up to the current level.
+    /// Every level above 0 has its own Z3 scope.
+    levels: Vec<Level>,
+    /// Lits assigned at the current level since the last check, with their
+    /// constraints, in assignment order. Asserted by `flush_queued`.
+    queued: Vec<(i32, Bool)>,
     /// Tracked arithmetic assertions added since the last arithmetic check.
     pending_partial_assertions: usize,
     /// Checks run so far, numbering the `--trace-z3-queries` log.
@@ -83,27 +95,19 @@ impl Z3IncrementalState {
             tracker_by_abs_lit: DeterministicHashMap::new(),
             non_arithmetic_lits: DeterministicHashSet::default(),
             active_lits: DeterministicHashSet::default(),
-            lits_by_level: vec![Vec::new()],
-            push_counts: vec![0],
-            vars_by_level: vec![Vec::new()],
-            current_level: 0,
+            levels: vec![Level::default()],
+            queued: Vec::new(),
             pending_partial_assertions: 0,
             checks: 0,
         }
     }
 
-    /// Ensure `push_counts` and per-level tracking vectors are indexed up to
-    /// `self.current_level`.
-    fn ensure_level_slot(&mut self) {
-        while self.push_counts.len() <= self.current_level {
-            self.push_counts.push(0);
-        }
-        while self.lits_by_level.len() <= self.current_level {
-            self.lits_by_level.push(Vec::new());
-        }
-        while self.vars_by_level.len() <= self.current_level {
-            self.vars_by_level.push(Vec::new());
-        }
+    fn current_level(&self) -> usize {
+        self.levels.len() - 1
+    }
+
+    fn top_level(&mut self) -> &mut Level {
+        self.levels.last_mut().unwrap()
     }
 
     /// Get or create the Z3 `Int` variable for an egraph id. On first
@@ -116,8 +120,7 @@ impl Z3IncrementalState {
         }
         let v = Int::new_const(format!("var_{egraph_id}"));
         self.var_map.insert(egraph_id, v.clone());
-        self.ensure_level_slot();
-        self.vars_by_level[self.current_level].push(egraph_id);
+        self.top_level().vars.push(egraph_id);
 
         let solver_uid = solver_state.to_solver_uid(egraph_id);
         if let Some(expr) = extract_lazy_expression(solver_uid, solver_state) {
@@ -222,35 +225,55 @@ impl Z3IncrementalState {
         Some(LinearConstraint::new(le, re, func, vec![]))
     }
 
+    /// Open the new level's scope. The lits queued at the level below are
+    /// asserted first, so that they belong to its scope.
     pub fn notify_new_decision_level(&mut self) {
-        self.current_level += 1;
-        self.ensure_level_slot();
+        self.flush_queued();
+        self.solver.push();
+        self.levels.push(Level::default());
     }
 
-    /// Pop everything pushed above `level`.
+    /// Pop the scopes of the levels above `level`, and drop the lits queued
+    /// at the current level, which is one of them.
     pub fn notify_backtrack(&mut self, level: usize) {
-        while self.current_level > level {
-            let n = self.push_counts.pop().unwrap_or(0);
-            if n > 0 {
-                self.solver.pop(n);
-            }
-            if let Some(lits) = self.lits_by_level.pop() {
-                for l in lits {
-                    self.active_lits.remove(&l);
-                }
-            }
-            if let Some(vars) = self.vars_by_level.pop() {
-                for id in vars {
-                    self.var_map.remove(&id);
-                }
-            }
-            self.current_level -= 1;
+        if self.current_level() <= level {
+            return;
         }
-        self.ensure_level_slot();
+        self.queued.clear();
+        self.solver.pop((self.current_level() - level) as u32);
+        for popped in self.levels.drain(level + 1..) {
+            for lit in popped.lits {
+                self.active_lits.remove(&lit);
+            }
+            for id in popped.vars {
+                self.var_map.remove(&id);
+            }
+        }
     }
 
-    /// Push a newly-assigned SAT literal's arithmetic constraint (if any),
-    /// tracked so the unsat core recovers it.
+    /// Queue `ast` for `lit`, assigned at the current level, until the next
+    /// check.
+    fn queue(&mut self, lit: i32, ast: Bool) {
+        let abs_lit = lit.abs();
+        self.tracker_by_abs_lit
+            .entry(abs_lit)
+            .or_insert_with(|| Bool::new_const(format!("lit_{abs_lit}")));
+        self.active_lits.insert(lit);
+        self.top_level().lits.push(lit);
+        self.queued.push((lit, ast));
+        self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
+    }
+
+    /// Assert the queued lits in the current level's scope, tracked so the
+    /// unsat core recovers them.
+    fn flush_queued(&mut self) {
+        for (lit, ast) in std::mem::take(&mut self.queued) {
+            let tracker = self.tracker_by_abs_lit[&lit.abs()].clone();
+            self.solver.assert_and_track(ast, &tracker);
+        }
+    }
+
+    /// Queue a newly-assigned SAT literal's arithmetic constraint (if any).
     pub fn on_literal_assignment(&mut self, lit: i32, solver_state: &mut SolverState) {
         let abs_lit = lit.abs();
         if self.non_arithmetic_lits.contains(&abs_lit) || self.active_lits.contains(&lit) {
@@ -261,28 +284,17 @@ impl Z3IncrementalState {
             return;
         };
         let ast = self.constraint_to_z3(&constraint, solver_state);
-        let tracker = self
-            .tracker_by_abs_lit
-            .entry(abs_lit)
-            .or_insert_with(|| Bool::new_const(format!("lit_{abs_lit}")))
-            .clone();
-        self.ensure_level_slot();
-        self.solver.push();
-        self.push_counts[self.current_level] += 1;
-        self.active_lits.insert(lit);
-        self.lits_by_level[self.current_level].push(lit);
-        self.solver.assert_and_track(ast, &tracker);
-        self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
+        self.queue(lit, ast);
         debug_println!(
             21,
             0,
-            "[z3inc] pushed atom lit={} at level {}",
+            "[z3inc] queued atom lit={} at level {}",
             lit,
-            self.current_level
+            self.current_level()
         );
     }
 
-    /// Drain the egraph's arithmetic merge queue, pushing each merge as a
+    /// Drain the egraph's arithmetic merge queue, queueing each merge as a
     /// tracked `var_a == var_b` assertion. Returns SAT lits that
     /// `make_eq` created here (so the caller can register them as observed).
     pub fn drain_merge_queue(&mut self, solver_state: &mut SolverState) -> Vec<i32> {
@@ -290,7 +302,6 @@ impl Z3IncrementalState {
         if merges.is_empty() {
             return Vec::new();
         }
-        self.ensure_level_slot();
         let mut new_lits: Vec<i32> = Vec::new();
         for (a, b) in merges {
             let lit = solver_state.make_eq(a, b);
@@ -303,25 +314,15 @@ impl Z3IncrementalState {
             }
             let va = self.var_for(a, solver_state);
             let vb = self.var_for(b, solver_state);
-            let tracker = self
-                .tracker_by_abs_lit
-                .entry(abs_lit)
-                .or_insert_with(|| Bool::new_const(format!("lit_{abs_lit}")))
-                .clone();
-            self.solver.push();
-            self.push_counts[self.current_level] += 1;
-            self.active_lits.insert(lit);
-            self.lits_by_level[self.current_level].push(lit);
-            self.solver.assert_and_track(Int::eq(&va, vb), &tracker);
-            self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
+            self.queue(lit, Int::eq(&va, vb));
             debug_println!(
                 21,
                 0,
-                "[z3inc] pushed egraph merge var_{}==var_{} as lit {} at level {}",
+                "[z3inc] queued egraph merge var_{}==var_{} as lit {} at level {}",
                 a,
                 b,
                 lit,
-                self.current_level
+                self.current_level()
             );
         }
         new_lits
@@ -350,11 +351,13 @@ impl Z3IncrementalState {
         lits.into_iter().collect()
     }
 
-    /// Check the tracked assertions; `assert_and_track` already makes Z3
-    /// assume the trackers of the scopes still open, so none are passed. With
-    /// `--trace-z3-queries`, log the query as SMT-LIB2 before the check, and
-    /// its result with Z3's cumulative bound counts after it.
+    /// Assert the queued lits and check the tracked assertions;
+    /// `assert_and_track` already makes Z3 assume the trackers of the scopes
+    /// still open, so none are passed. With `--trace-z3-queries`, log the
+    /// query as SMT-LIB2 before the check, and its result with Z3's
+    /// cumulative bound counts after it.
     fn check_active(&mut self, kind: &str) -> SatResult {
+        self.flush_queued();
         self.checks += 1;
         if trace_z3_queries() {
             // let names: Vec<String> = self
@@ -366,7 +369,7 @@ impl Z3IncrementalState {
             // eprintln!(
             //     "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
             //     self.checks,
-            //     self.current_level,
+            //     self.current_level(),
             //     self.solver,
             //     names.join(" ")
             // );
@@ -406,7 +409,7 @@ impl Z3IncrementalState {
             21,
             0,
             "[z3inc] partial check at level {}",
-            self.current_level
+            self.current_level()
         );
         match self.check_active("partial") {
             SatResult::Sat => PartialCheckResult::Sat,
@@ -420,7 +423,7 @@ impl Z3IncrementalState {
     /// model value for the caller's Nelson-Oppen probe. On UNSAT, recover
     /// the SAT lits from the unsat core.
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
-        debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level);
+        debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level());
         // Materialize every arithmetic term's var + definition before checking.
         let arithmetic_terms = solver_state.arithmetic_terms.clone();
         for term_id in &arithmetic_terms {
