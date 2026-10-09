@@ -357,6 +357,14 @@ impl Z3IncrementalState {
         lits.into_iter().collect()
     }
 
+    /// A cumulative Z3 statistic. Z3 leaves a counter out until it is nonzero.
+    fn z3_stat(&self, key: &str) -> u32 {
+        match self.solver.get_statistics().value(key) {
+            Some(z3::StatisticsValue::UInt(n)) => n,
+            _ => 0,
+        }
+    }
+
     /// Assert the queued lits and check the tracked assertions;
     /// `assert_and_track` already makes Z3 assume the trackers of the scopes
     /// still open, so none are passed. With `--trace-z3-queries`, log the
@@ -382,13 +390,16 @@ impl Z3IncrementalState {
             // );
         }
         let result = self.solver.check();
+        // Every Boolean Z3 sees is assigned by Sundance's trail, through the
+        // trackers. A decision means Z3 searched on its own, which this
+        // backend is meant to rule out.
+        debug_assert_eq!(
+            self.z3_stat("decisions"),
+            0,
+            "z3incremental: Z3 made decisions by {kind} check {}",
+            self.checks
+        );
         if trace_z3_queries() {
-            let stats = self.solver.get_statistics();
-            // Z3 leaves a counter out until it is nonzero
-            let count = |key: &str| match stats.value(key) {
-                Some(z3::StatisticsValue::UInt(n)) => n,
-                _ => 0,
-            };
             let result_name = match result {
                 SatResult::Sat => "sat",
                 SatResult::Unsat => "unsat",
@@ -397,8 +408,8 @@ impl Z3IncrementalState {
             eprintln!(
                 "; z3 {kind} check {} result {result_name} arith-lower={} arith-upper={}",
                 self.checks,
-                count("arith-lower"),
-                count("arith-upper")
+                self.z3_stat("arith-lower"),
+                self.z3_stat("arith-upper")
             );
         }
         result
