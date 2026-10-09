@@ -364,14 +364,14 @@ impl Z3IncrementalState {
         let assumptions = self.active_assumptions();
         self.checks += 1;
         if trace_z3_queries() {
-            let names: Vec<String> = assumptions.iter().map(|a| a.to_string()).collect();
-            eprintln!(
-                "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
-                self.checks,
-                self.current_level,
-                self.solver,
-                names.join(" ")
-            );
+            // let names: Vec<String> = assumptions.iter().map(|a| a.to_string()).collect();
+            // eprintln!(
+            //     "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
+            //     self.checks,
+            //     self.current_level,
+            //     self.solver,
+            //     names.join(" ")
+            // );
         }
         let result = self.solver.check_assumptions(&assumptions);
         if trace_z3_queries() {
