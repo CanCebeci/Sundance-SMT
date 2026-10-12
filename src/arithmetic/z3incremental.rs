@@ -452,9 +452,9 @@ impl Z3IncrementalState {
     /// Check only the current tracked arithmetic trail, without constructing
     /// a model or inspecting any non-arithmetic query formula.
     pub(crate) fn check_partial_trail(&mut self) -> PartialCheckResult {
-        // if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
-        //     return PartialCheckResult::Unchanged;
-        // }
+        if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
+            return PartialCheckResult::Unchanged;
+        }
         // Nothing to learn from repeating the last query
         if !self.changed_since_check {
             return PartialCheckResult::Unchanged;
