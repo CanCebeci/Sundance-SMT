@@ -216,17 +216,37 @@ impl Z3IncrementalState {
         Some(atom)
     }
 
-    /// Internalize every arithmetic term known before the search: create its
-    /// Z3 var and assert its definition at level 0, outside every scope, so
-    /// that no backtrack removes it. Terms that appear later, e.g. in
-    /// quantifier instances, are internalized when first used, at the
-    /// current level.
+    /// Internalize the arithmetic known before the search at level 0, outside
+    /// every scope, so that no backtrack removes it: every arithmetic term gets
+    /// its Z3 var, whose definition is asserted, and every arithmetic literal's
+    /// constraint is internalized without being asserted. Z3 thus creates the
+    /// tableau columns of all of them here, including those of opaque terms
+    /// (e.g. `(f 1)`) and of the terms of atoms, and asserting a constraint
+    /// later only adds a bound. Terms and literals that appear later, e.g. in
+    /// quantifier instances, are internalized when first used, at the current
+    /// level.
     pub fn internalize_terms(&mut self, solver_state: &mut SolverState) {
         debug_assert_eq!(self.current_level(), 0);
         let arithmetic_terms = solver_state.arithmetic_terms.clone();
         for term_id in &arithmetic_terms {
             let egraph_id = solver_state.to_egraph_id(*term_id);
-            let _ = self.var_for(egraph_id, solver_state);
+            let var = self.var_for(egraph_id, solver_state);
+            self.solver.internalize(&var);
+        }
+        for var in 1..solver_state.cnf_cache.next_var {
+            let Some(&uid) = solver_state.cnf_cache.var_map_reverse.get(&var) else {
+                continue;
+            };
+            if solver_state.get_term_safe(uid).is_none() {
+                continue;
+            }
+            for lit in [var, -var] {
+                let Some(atom) = self.atom_for(lit, solver_state) else {
+                    self.non_arithmetic_lits.insert(var);
+                    break;
+                };
+                self.solver.internalize(&atom);
+            }
         }
     }
 
@@ -280,22 +300,29 @@ impl Z3IncrementalState {
         }
     }
 
+    /// The Z3 constraint `var_t1 op var_t2` of a signed SAT literal
+    /// `(op t1 t2)`, or None if the literal isn't arithmetic. Internalizing
+    /// and asserting build it the same way, so that Z3 sees the same atom.
+    fn atom_for(&mut self, lit: i32, solver_state: &mut SolverState) -> Option<Bool> {
+        let (left, right, func) = Self::extract_lazy_constraint(lit, solver_state)?;
+        let left = self.var_for(left, solver_state);
+        let right = self.var_for(right, solver_state);
+        Some(match func {
+            FunctionType::Leq => Int::le(&left, &right),
+            FunctionType::Lt => Int::lt(&left, &right),
+            FunctionType::Eq => unreachable!("equality atoms are not arithmetic literals"),
+        })
+    }
+
     /// Queue a newly-assigned SAT literal's arithmetic constraint (if any).
     pub fn on_literal_assignment(&mut self, lit: i32, solver_state: &mut SolverState) {
         let abs_lit = lit.abs();
         if self.non_arithmetic_lits.contains(&abs_lit) || self.active_lits.contains(&lit) {
             return;
         }
-        let Some((left, right, func)) = Self::extract_lazy_constraint(lit, solver_state) else {
+        let Some(ast) = self.atom_for(lit, solver_state) else {
             self.non_arithmetic_lits.insert(abs_lit);
             return;
-        };
-        let left = self.var_for(left, solver_state);
-        let right = self.var_for(right, solver_state);
-        let ast = match func {
-            FunctionType::Leq => Int::le(&left, &right),
-            FunctionType::Lt => Int::lt(&left, &right),
-            FunctionType::Eq => unreachable!("equality atoms are not arithmetic literals"),
         };
         self.queue(lit, ast);
         debug_println!(
@@ -382,19 +409,19 @@ impl Z3IncrementalState {
         self.changed_since_check = false;
         self.checks += 1;
         if trace_z3_queries() {
-            // let names: Vec<String> = self
-            //     .active_lits
-            //     .iter()
-            //     .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()))
-            //     .map(|a| a.to_string())
-            //     .collect();
-            // eprintln!(
-            //     "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
-            //     self.checks,
-            //     self.current_level(),
-            //     self.solver,
-            //     names.join(" ")
-            // );
+            let names: Vec<String> = self
+                .active_lits
+                .iter()
+                .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()))
+                .map(|a| a.to_string())
+                .collect();
+            eprintln!(
+                "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
+                self.checks,
+                self.current_level(),
+                self.solver,
+                names.join(" ")
+            );
         }
         let result = self.solver.check();
         // Every Boolean Z3 sees is assigned by Sundance's trail, through the
