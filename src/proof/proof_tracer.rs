@@ -17,8 +17,10 @@ use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, SymbolQuot
 /// the SAT solver (e.g. an un-reduced instantiation). They are numbered from here
 /// rather than from `cnf_cache.next_var`, because CaDiCaL creates every variable
 /// up to the largest one it sees, so a proof-only number in the SAT range becomes
-/// an unconstrained decision variable.
-const PROOF_ONLY_LITERAL_BASE: i32 = 1 << 30;
+/// an unconstrained decision variable. [`SMTProofTracer::generate_edrat`] renumbers
+/// them to follow the SAT literals, since proof checkers like drat-trim allocate
+/// per-variable arrays up to the largest variable.
+pub(crate) const PROOF_ONLY_LITERAL_BASE: i32 = 1 << 30;
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
@@ -345,6 +347,7 @@ impl SMTProofTracer {
         literals_defined: &mut HashSet<i32>,
         clause: &[i32],
         out: &mut String,
+        renumber: impl Fn(i32) -> i32,
     ) {
         for &lit in clause {
             debug_println!(12, 2, "Introducing the literal {}", lit);
@@ -362,7 +365,11 @@ impl SMTProofTracer {
                 );
 
                 if !literals_defined.contains(&lit) {
-                    out.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
+                    out.push_str(&format!(
+                        "(edrat-literal {} {})\n",
+                        renumber(lit),
+                        polarized_term
+                    ));
                     literals_defined.insert(lit);
                 }
             } else {
@@ -444,6 +451,24 @@ impl SMTProofTracer {
         self.instantiations_for_smt2.clear(); // Clear previous instantiations
         let mut literals_defined: HashSet<i32> = HashSet::new();
 
+        // Proof-only literals are printed right after the largest SAT literal
+        // the proof mentions; every printed literal is in `terms_list`.
+        let max_sat_var = self
+            .terms_list
+            .keys()
+            .map(|lit| lit.abs())
+            .filter(|&var| var < PROOF_ONLY_LITERAL_BASE)
+            .max()
+            .unwrap_or(0);
+        let renumber = |lit: i32| {
+            let var = lit.abs();
+            if var < PROOF_ONLY_LITERAL_BASE {
+                lit
+            } else {
+                lit.signum() * (max_sat_var + 1 + (var - PROOF_ONLY_LITERAL_BASE))
+            }
+        };
+
         // emit the sorts, datatypes, and the symbol table
         for (sort, sort_def) in &self.sorts {
             output.push_str(&format_sort_declaration(sort, sort_def));
@@ -462,7 +487,7 @@ impl SMTProofTracer {
                 ProofStepType::OriginalClause
                 | ProofStepType::TheoryClause(..)
                 | ProofStepType::Instantiation => {
-                    self.introduce_literals(&mut literals_defined, clause, &mut output)
+                    self.introduce_literals(&mut literals_defined, clause, &mut output, renumber)
                 }
                 ProofStepType::Skolemization {
                     parent_term,
@@ -480,20 +505,24 @@ impl SMTProofTracer {
                         &mut literals_defined,
                         std::slice::from_ref(parent_term),
                         &mut output,
+                        renumber,
                     );
                     for (i, var) in skolem_vars.iter().enumerate() {
                         // CC TODO think about negated parent term, if (negated forall)
                         output.push_str(&format!(
                             "(declare-skolem {} {} {} {})\n",
-                            parent_term, i, var.0, var.1
+                            renumber(*parent_term),
+                            i,
+                            var.0,
+                            var.1
                         ));
                     }
-                    self.introduce_literals(&mut literals_defined, clause, &mut output);
+                    self.introduce_literals(&mut literals_defined, clause, &mut output, renumber);
                 }
                 _ => {}
             }
 
-            step.push_line_to(&mut output);
+            step.push_line_to(&mut output, renumber);
 
             // Stop adding proof steps to the output once the empty clause is derived
             if matches!(typ, ProofStepType::SATClause) && clause.is_empty() {

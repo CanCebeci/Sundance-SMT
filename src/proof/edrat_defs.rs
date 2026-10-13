@@ -92,10 +92,11 @@ impl ProofStepType {
 }
 
 impl ProofStep {
-    pub fn push_line_to(&self, output: &mut String) {
+    /// Writes the step as one eDRAT line, printing each literal as `renumber(lit)`.
+    pub fn push_line_to(&self, output: &mut String, renumber: impl Fn(i32) -> i32) {
         output.push_str(&self.typ.get_prefix_str());
-        for lit in &self.clause {
-            output.push_str(&format!("{} ", lit));
+        for &lit in &self.clause {
+            output.push_str(&format!("{} ", renumber(lit)));
         }
         output.push_str("0\n");
     }

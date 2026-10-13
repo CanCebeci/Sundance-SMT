@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::proof::PROOF_ONLY_LITERAL_BASE;
 use sat_interface::{Clause, Formula};
 use std::collections::HashMap;
 use yaspar_ir::ast::alg::CheckIdentifier;
@@ -53,8 +54,8 @@ pub(crate) struct CNFEnv<'a> {
 impl CNFEnv<'_> {
     fn new_var(&mut self) -> i32 {
         let v = self.cache.next_var;
-        if v == i32::MAX {
-            panic!("Too many boolean variables; reached i32::MAX!");
+        if v == PROOF_ONLY_LITERAL_BASE {
+            panic!("Too many boolean variables; reached the proof-only literal range!");
         }
         self.cache.next_var += 1;
         v
