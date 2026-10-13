@@ -25,10 +25,6 @@ use z3::{
     ast::{Bool, Int},
 };
 
-/// Min new assertions before `check_partial_trail` actually calls Z3.
-#[allow(dead_code)]
-const PARTIAL_CHECK_ASSERTION_BATCH: usize = 32;
-
 fn ibig_to_bigint(n: &IBig) -> num::BigInt {
     num::BigInt::parse_bytes(n.to_string().as_bytes(), 10).unwrap()
 }
@@ -389,9 +385,6 @@ impl IncrementalArithSolver for Z3IncrementalState {
     /// Check only the current tracked arithmetic trail, without constructing
     /// a model.
     fn check_partial_trail(&mut self) -> PartialCheckResult {
-        // if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
-        //     return PartialCheckResult::Unchanged;
-        // }
         // Nothing to learn from repeating the last query
         if !self.changed_since_check {
             return PartialCheckResult::Unchanged;
