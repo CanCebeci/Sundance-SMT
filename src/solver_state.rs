@@ -110,11 +110,6 @@ pub struct SolverState {
     /// Bidirectional mapping between solver term UIDs and egraph term IDs
     pub id_map: bimap::BiMap<u64, u32>,
 
-    /// Roots of relevancy propagation (see `crate::relevancy`): each formula is
-    /// relevant while its guard literal is true (guard 0 = always, for input
-    /// assertions; quantifier instances are guarded by their quantifier literal).
-    pub relevancy_roots: Vec<(i32, Term)>,
-
     /// Map from term UID to yaspar Term objects (solver-level, not in egraph)
     pub terms_list: Vec<TermOption>,
 
@@ -190,7 +185,6 @@ impl SolverState {
             current_hash: 1,
             hash_at_level: vec![1, 1],
             id_map: bimap::BiMap::new(),
-            relevancy_roots: vec![],
             terms_list: vec![TermOption::None],
             assertions: vec![],
             quantifiers: vec![],
@@ -340,11 +334,6 @@ impl SolverState {
             .id_map
             .get_by_left(&solver_uid)
             .unwrap_or_else(|| panic!("to_egraph_id: no egraph ID for solver uid {}", solver_uid))
-    }
-
-    /// The egraph term ID of a solver term UID, if the term is in the egraph.
-    pub fn egraph_id(&self, solver_uid: u64) -> Option<u32> {
-        self.id_map.get_by_left(&solver_uid).copied()
     }
 
     /// Convert an egraph term ID to the corresponding solver UID.

@@ -3,7 +3,7 @@
 
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
-use crate::cadical_propagator::CustomExternalPropagator;
+use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
@@ -44,21 +44,14 @@ pub fn cdcl_decision_procedure(
     arithmetic: ArithSolver,
     timeout: u64,
     elevate: i32,
-    reverse: bool,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
-    eager_qi: bool,
-    max_qi_generation: u32,
-    relevancy: bool,
+    eager_qi: i32,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
         solver.set("elevate".to_string(), elevate),
         "CaDiCaL option 'elevate' is unavailable; Sundance requires the cadical-sys elevate fork for lazy quantifier instantiation"
-    );
-    assert!(
-        solver.set("reverse".to_string(), reverse as i32),
-        "CaDiCaL option 'reverse' is unavailable"
     );
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
@@ -97,7 +90,7 @@ pub fn cdcl_decision_procedure(
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
-        queued_clauses: RefCell::new(vec![]),
+        disequalities: RefCell::new(vec![]),
         fixed_literals: DeterministicHashSet::default(),
         proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
         assignments: vec![0, 0],
@@ -105,9 +98,7 @@ pub fn cdcl_decision_procedure(
         arithmetic,
         stats: SolverStats::new(),
         pending: None,
-        eager_qi,
-        max_qi_generation,
-        relevancy: relevancy.then(crate::relevancy::Relevancy::new),
+        eager_qi: EagerQiMode::new(eager_qi),
         materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
@@ -124,8 +115,6 @@ pub fn cdcl_decision_procedure(
                 }
             }),
         trail_atoms: std::collections::HashMap::new(),
-        awaiting_decision: false,
-        var_origin: crate::utils::DeterministicHashMap::default(),
     };
 
     solver.connect_external_propagator(&mut propagator);
@@ -141,7 +130,7 @@ pub fn cdcl_decision_procedure(
         add_clause_to_proof_and_solver(clause, &mut solver, &proof_tracer, None);
     }
 
-    // adding this into the queued clauses instead so that it appears as a theory lemma
+    // adding this into disequalities instead so that it appears as a theory lemma
     for clause in &boolean_dt_constraints {
         add_clause_to_proof_and_solver(clause, &mut solver, &proof_tracer, Some(Theory::Datatypes));
     }

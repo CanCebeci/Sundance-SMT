@@ -152,18 +152,11 @@ pub trait EgraphTrait {
     /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
     /// - `None` means the pattern can match any term of the right function
     ///
-    /// Returns a list of substitution maps (bound variable `Local` → matched term ID),
-    /// each with the match's generation: the largest generation among the terms
-    /// the trigger's function applications matched (input terms are generation 0).
-    ///
-    /// With `relevant`, trigger patterns without a ground hint only match
-    /// function applications whose term ID is in the set; nested patterns and
-    /// hinted patterns still see the whole e-class.
+    /// Returns a list of substitution maps (bound variable `Local` → matched term ID).
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
-        relevant: Option<&crate::utils::FastDeterministicHashSet<Self::TermId>>,
-    ) -> Vec<(crate::utils::DeterministicHashMap<Local, Self::TermId>, u32)>;
+    ) -> Vec<crate::utils::DeterministicHashMap<Local, Self::TermId>>;
 
     // --- Backtracking ---
 

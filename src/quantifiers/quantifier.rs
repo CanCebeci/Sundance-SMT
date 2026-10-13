@@ -10,26 +10,20 @@ use std::rc::Rc;
 use crate::arithmetic::simplify::ArithSimplify;
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
-use crate::log::trace_relevancy;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
-use crate::utils::{DeterministicHashMap, FastDeterministicHashSet};
+use crate::utils::DeterministicHashMap;
 
 use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
-    Instantiation {
-        clauses: Vec<Vec<i32>>,
-        generation: u32,
-    },
-    Skolemization {
-        clauses: Vec<Vec<i32>>,
-    },
+    Instantiation { clauses: Vec<Vec<i32>> },
+    Skolemization { clauses: Vec<Vec<i32>> },
 }
 
 struct DeferredInstantiation {
@@ -37,8 +31,6 @@ struct DeferredInstantiation {
     is_exists: bool,
     literal: i32,
     quantifier_id: u64,
-    /// One more than the largest generation among the match's bindings
-    generation: u32,
 }
 
 struct DeferredSkolemization {
@@ -66,35 +58,13 @@ impl PendingInstantiations {
 
 /// Computes trigger matches and substitutions, returning deferred items
 /// that can be materialized one at a time.
-///
-/// A match's instance has generation one more than the match's generation: the
-/// largest generation among the e-nodes its trigger matched (input terms are 0;
-/// terms an instance introduces get the instance's generation). With
-/// `max_generation`, matches whose instance would exceed it are skipped without
-/// being recorded as added, so a later round without the limit can still
-/// instantiate them. This bounds matching loops: only finitely many terms have
-/// a generation up to the limit, and so only finitely many matches.
 pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
     allow_skolemization: bool,
-    max_generation: Option<u32>,
-    relevant: Option<&FastDeterministicHashSet<u32>>,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
-    // With `relevant`, trigger matches only start from relevant e-nodes
-    if let Some(relevant) = relevant
-        && trace_relevancy()
-    {
-        eprintln!("[relevancy] {} relevant e-nodes", relevant.len());
-        let mut ids: Vec<u32> = relevant.iter().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            let term = solver_state.get_term(solver_state.to_solver_uid(id));
-            eprintln!("[relevancy]   #{id}: {term}");
-        }
-    }
     let quantifiers = &solver_state.quantifiers.clone();
     let mut skolemized_quantifier_idxs = vec![];
     let mut deferred_skolemizations: VecDeque<DeferredSkolemization> = VecDeque::new();
@@ -163,20 +133,13 @@ pub(crate) fn instantiate_quantifiers(
             let trigger_term_pairs: Vec<(usize, Option<u32>)> =
                 multipattern.iter().map(|t| (*t, None)).collect();
 
-            let list_assignments = solver_state
-                .egraph
-                .match_triggers(trigger_term_pairs, relevant);
+            let list_assignments = solver_state.egraph.match_triggers(trigger_term_pairs);
 
             if list_assignments.is_empty() {
                 continue;
             }
 
-            for (subs_ids, match_generation) in list_assignments.iter() {
-                let generation = match_generation + 1;
-                if max_generation.is_some_and(|max| generation > max) {
-                    continue;
-                }
-
+            for subs_ids in list_assignments.iter() {
                 // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
                 let subs: DeterministicHashMap<Local, Term> = subs_ids
                     .iter()
@@ -207,7 +170,6 @@ pub(crate) fn instantiate_quantifiers(
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
                     quantifier_id: quantifier.id,
-                    generation,
                 });
             }
         }
@@ -280,21 +242,16 @@ fn process_deferred_skolemizations(
 
         solver_state.insert_predecessor(&reduced_skolem, None, None, true);
 
-        // Must do Tseitin *before* looking up the skolem literal — see comment on instantiation path
+        // Must do Tseitin *before* allocating the skolem literal — see comment on instantiation path
         let clauses = reduced_skolem.cnf_tseitin(solver_state);
 
         debug_println!(26, 0, "(assert {})", reduced_skolem);
 
         let quantifier_dimacs_literal = if is_exists { literal } else { -literal };
-        solver_state
-            .relevancy_roots
-            .push((quantifier_dimacs_literal, reduced_skolem.clone()));
         let reduced_skolem_literal = solver_state.get_lit_from_term(&reduced_skolem);
         // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
         let skolem_literal = if skolem.uid() != reduced_skolem.uid() {
-            solver_state
-                .get_lit_from_term_safe(&skolem)
-                .unwrap_or_else(|| proof_tracer.borrow_mut().new_proof_only_literal())
+            solver_state.get_or_allocate_lit_for_term(&skolem)
         } else {
             0
         };
@@ -357,7 +314,6 @@ fn process_deferred_instantiations(
         is_exists,
         literal,
         quantifier_id,
-        generation,
     } in deferred_instantiations
     {
         let t = if is_exists {
@@ -388,8 +344,6 @@ fn process_deferred_instantiations(
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
-        // E-nodes this instance introduces inherit its generation (reset below)
-        solver_state.egraph.current_generation = generation;
         solver_state.insert_predecessor(&nnf_term, None, None, true);
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
@@ -400,17 +354,10 @@ fn process_deferred_instantiations(
             .collect();
 
         let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
-        solver_state
-            .relevancy_roots
-            .push((quantifier_dimacs_literal, nnf_term.clone()));
         let nnf_term_literal = solver_state.get_lit_from_term(&nnf_term);
-        // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first.
-        // The un-reduced instance only appears in the proof, so unless it already
-        // has a SAT literal it gets a proof-only one that CaDiCaL never sees.
+        // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
         let subst_literal = if t.uid() != nnf_term.uid() {
-            solver_state
-                .get_lit_from_term_safe(&t)
-                .unwrap_or_else(|| proof_tracer.borrow_mut().new_proof_only_literal())
+            solver_state.get_or_allocate_lit_for_term(&t)
         } else {
             0
         };
@@ -448,7 +395,6 @@ fn process_deferred_instantiations(
 
         let additional_constraints =
             check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
-        solver_state.egraph.current_generation = 0;
         proof_tracer.borrow_mut().push_steps(
             &additional_constraints,
             ProofStepType::TheoryClause(Theory::Background),
@@ -457,10 +403,7 @@ fn process_deferred_instantiations(
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
 
-        results.push(QuantifierInstance::Instantiation {
-            clauses,
-            generation,
-        });
+        results.push(QuantifierInstance::Instantiation { clauses });
     }
     results
 }

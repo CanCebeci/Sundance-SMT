@@ -20,7 +20,6 @@ use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::arithmetic::lp::{ArithResult, Coefficient, FunctionType};
 use crate::debug_println;
 use crate::egraphs::traits::EgraphTrait;
-use crate::log::trace_z3_queries;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::Integer;
@@ -401,28 +400,11 @@ impl Z3IncrementalState {
 
     /// Assert the queued lits and check the tracked assertions;
     /// `assert_and_track` already makes Z3 assume the trackers of the scopes
-    /// still open, so none are passed. With `--trace-z3-queries`, log the
-    /// query as SMT-LIB2 before the check, and its result with Z3's
-    /// cumulative bound counts after it.
+    /// still open, so none are passed.
     fn check_active(&mut self, kind: &str) -> SatResult {
         self.flush_queued();
         self.changed_since_check = false;
         self.checks += 1;
-        if trace_z3_queries() {
-            let names: Vec<String> = self
-                .active_lits
-                .iter()
-                .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()))
-                .map(|a| a.to_string())
-                .collect();
-            eprintln!(
-                "; z3 {kind} check {} at level {}\n{}(check-sat-assuming ({}))",
-                self.checks,
-                self.current_level(),
-                self.solver,
-                names.join(" ")
-            );
-        }
         let result = self.solver.check();
         // Every Boolean Z3 sees is assigned by Sundance's trail, through the
         // trackers. A decision means Z3 searched on its own, which this
@@ -433,19 +415,6 @@ impl Z3IncrementalState {
             "z3incremental: Z3 made decisions by {kind} check {}",
             self.checks
         );
-        if trace_z3_queries() {
-            let result_name = match result {
-                SatResult::Sat => "sat",
-                SatResult::Unsat => "unsat",
-                SatResult::Unknown => "unknown",
-            };
-            eprintln!(
-                "; z3 {kind} check {} result {result_name} arith-lower={} arith-upper={}",
-                self.checks,
-                self.z3_stat("arith-lower"),
-                self.z3_stat("arith-upper")
-            );
-        }
         result
     }
 

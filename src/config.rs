@@ -44,26 +44,10 @@ pub struct Args {
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
-    /// Instantiate quantifiers eagerly: after every batch of assignments, find all
-    /// trigger matches and add every instance, instead of waiting for a complete model
-    #[arg(long, default_value_t = false)]
-    pub eager_qi: bool,
-    /// Largest generation of instances added by `--eager-qi` (input terms are
-    /// generation 0; an instance is one more than the terms its trigger matched).
-    /// Bounds matching loops; instances above it are left to the complete-model check.
-    #[arg(long, default_value_t = 10)]
-    pub max_qi_generation: u32,
-    /// With `--eager-qi`, only start trigger matches from relevant terms (Z3-style
-    /// relevancy over the Boolean structure of the current assignment).
-    /// Complete-model checks still match against every term.
-    #[arg(long, default_value_t = false)]
-    pub relevancy: bool,
-    /// Split input assertions into clauses like Z3's `flatten_clauses`, distributing
-    /// disjunctions over unshared conjunctions. The flattened clauses are not justified
-    /// in `--proof`/`--partial-proof` output, so proofs might not check (Z3 skips it when
-    /// proofs are enabled).
-    #[arg(long, default_value_t = false)]
-    pub flatten_clauses: bool,
+    /// Max quantifier instantiations to add eagerly at each decision level.
+    /// A negative value exhausts one fresh matching round per level; 0 disables eager QI.
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+    pub eager_qi: i32,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
     /// (Simplify/Z3-style auto-trigger inference). When off (default), an
     /// untriggered `forall` panics instead.
@@ -72,25 +56,12 @@ pub struct Args {
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,
-    /// Set CaDiCaL's `reverse` option: newly created variables enter the back of
-    /// the VMTF decision queue instead of the front (also reverses initial order)
-    #[arg(long, default_value_t = false)]
-    pub reverse: bool,
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
     /// Print solver statistics after solving
     #[arg(long, default_value_t = false)]
     pub stats: bool,
-    /// Trace decisions, eager/lazy quantifier instances and backtracks to stderr
-    #[arg(long, default_value_t = false)]
-    pub trace_decisions: bool,
-    /// Trace the relevant e-nodes of each `--relevancy` matching round to stderr
-    #[arg(long, default_value_t = false)]
-    pub trace_relevancy: bool,
-    /// Log each partial arithmetic check's Z3 query to stderr as SMT-LIB2
-    #[arg(long, default_value_t = false)]
-    pub trace_z3_queries: bool,
     /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,

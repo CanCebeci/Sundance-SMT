@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Global debug level - controls which debug messages are printed
 static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(30);
@@ -16,39 +16,6 @@ pub fn get_debug_level() -> u8 {
 
 pub fn is_important(importance: u8) -> bool {
     get_debug_level() <= importance
-}
-
-/// Whether to trace CDCL decisions, quantifier instances and backtracks
-static TRACE_DECISIONS: AtomicBool = AtomicBool::new(false);
-
-pub fn set_trace_decisions(enabled: bool) {
-    TRACE_DECISIONS.store(enabled, Ordering::SeqCst);
-}
-
-pub fn trace_decisions() -> bool {
-    TRACE_DECISIONS.load(Ordering::Relaxed)
-}
-
-/// Whether to trace the relevant e-nodes of each eager matching round
-static TRACE_RELEVANCY: AtomicBool = AtomicBool::new(false);
-
-pub fn set_trace_relevancy(enabled: bool) {
-    TRACE_RELEVANCY.store(enabled, Ordering::SeqCst);
-}
-
-pub fn trace_relevancy() -> bool {
-    TRACE_RELEVANCY.load(Ordering::Relaxed)
-}
-
-/// Whether to log the Z3 query of each partial arithmetic check
-static TRACE_Z3_QUERIES: AtomicBool = AtomicBool::new(false);
-
-pub fn set_trace_z3_queries(enabled: bool) {
-    TRACE_Z3_QUERIES.store(enabled, Ordering::SeqCst);
-}
-
-pub fn trace_z3_queries() -> bool {
-    TRACE_Z3_QUERIES.load(Ordering::Relaxed)
 }
 
 /// Debug macro -> used to print debug statements

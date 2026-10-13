@@ -8,13 +8,12 @@ use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
-use crate::log::{is_important, trace_decisions};
+use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
-use crate::relevancy::Relevancy;
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -22,11 +21,65 @@ use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+#[derive(Clone, Copy)]
+pub(crate) enum EagerQiMode {
+    Disabled,
+    Bounded { limit: usize, remaining: usize },
+    FullRound { started: bool },
+}
+
+enum EagerQiAction {
+    Bounded(usize),
+    FullRound,
+}
+
+impl EagerQiMode {
+    pub(crate) fn new(value: i32) -> Self {
+        if value < 0 {
+            Self::FullRound { started: false }
+        } else if value == 0 {
+            Self::Disabled
+        } else {
+            let limit = usize::try_from(value).expect("positive i32 must fit in usize");
+            Self::Bounded {
+                limit,
+                remaining: limit,
+            }
+        }
+    }
+
+    fn next_action(&mut self) -> Option<EagerQiAction> {
+        match self {
+            Self::Disabled | Self::Bounded { remaining: 0, .. } => None,
+            Self::Bounded { remaining, .. } => Some(EagerQiAction::Bounded(*remaining)),
+            Self::FullRound { started: true } => None,
+            Self::FullRound { started } => {
+                *started = true;
+                Some(EagerQiAction::FullRound)
+            }
+        }
+    }
+
+    fn consume(&mut self, count: usize) {
+        if let Self::Bounded { remaining, .. } = self {
+            *remaining -= count;
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Disabled => {}
+            Self::Bounded { limit, remaining } => *remaining = *limit,
+            Self::FullRound { started } => *started = false,
+        }
+    }
+}
+
 /// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
     pub solver_state: &'a mut SolverState,
-    pub queued_clauses: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
+    pub disequalities: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
@@ -34,12 +87,7 @@ pub struct CustomExternalPropagator<'a> {
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
-    /// Instantiate after every batch of assignments, not only at complete models
-    pub eager_qi: bool,
-    /// Largest instance generation eager rounds may add (complete-model rounds are unlimited)
-    pub max_qi_generation: u32,
-    /// Eager rounds only start matches from relevant terms (Some iff `--relevancy`)
-    pub relevancy: Option<Relevancy>,
+    pub(crate) eager_qi: EagerQiMode,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -56,12 +104,6 @@ pub struct CustomExternalPropagator<'a> {
     // at the end (only complete then, as new literals appear during the search).
     pub trail_writer: Option<std::io::BufWriter<std::fs::File>>,
     pub trail_atoms: std::collections::HashMap<i32, String>,
-    // --trace-decisions state: the next observed assignment after a new
-    // decision level is the decision literal (CaDiCaL flushes all pending
-    // assignments before deciding), and each variable created while applying
-    // a quantifier instance is tagged with that instance's number.
-    pub awaiting_decision: bool,
-    pub var_origin: DeterministicHashMap<i32, u64>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -97,7 +139,7 @@ impl<'a> CustomExternalPropagator<'a> {
 
         // CaDiCaL asks until the queue is empty before deciding, so this is the
         // last point to add instances for the current assignment.
-        if self.queued_clauses.borrow().is_empty() {
+        if self.disequalities.borrow().is_empty() {
             self.eagerly_instantiate_quantifiers();
         }
     }
@@ -239,7 +281,7 @@ impl<'a> CustomExternalPropagator<'a> {
         self.proof_tracer
             .borrow_mut()
             .register_clause_for_cadical_callback(&clause);
-        self.queued_clauses.borrow_mut().push(clause);
+        self.disequalities.borrow_mut().push(clause);
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
@@ -262,40 +304,14 @@ impl<'a> CustomExternalPropagator<'a> {
         &mut self,
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
-        // Variables for these instances were created by `materialize_next` and
-        // are not yet observed; tag them before tracing so the trace shows them.
-        if trace_decisions() {
-            let next_inst = self.stats.instantiations + 1;
-            for var in self.last_observed_var..self.solver_state.cnf_cache.next_var {
-                self.var_origin.insert(var, next_inst);
-            }
-        }
         for inst in instances {
-            let (kind, generation, clauses) = match inst {
-                Instantiation {
-                    clauses,
-                    generation,
-                } => {
+            let clauses = match inst {
+                Instantiation { clauses } => {
                     self.stats.instantiations += 1;
-                    ("qi", format!(" gen={generation}"), clauses)
+                    clauses
                 }
-                Skolemization { clauses } => ("skolem", String::new(), clauses),
+                Skolemization { clauses } => clauses,
             };
-            if trace_decisions() {
-                let clauses_str: Vec<String> = clauses
-                    .iter()
-                    .map(|c| {
-                        let lits: Vec<String> = c.iter().map(|l| self.trace_lit(*l)).collect();
-                        format!("({})", lits.join(" ∨ "))
-                    })
-                    .collect();
-                eprintln!(
-                    "[{kind}] #{} level={}{generation} {}",
-                    self.stats.instantiations,
-                    self.decision_level,
-                    clauses_str.join(" ∧ ")
-                );
-            }
             for clause in clauses {
                 self.queue_external_clause(clause.clone());
             }
@@ -309,22 +325,6 @@ impl<'a> CustomExternalPropagator<'a> {
             z3.drain_merge_queue(self.solver_state);
         }
         self.sync_new_vars();
-    }
-
-    /// Render a literal for `--trace-decisions`: signed var, origin and term.
-    fn trace_lit(&self, lit: i32) -> String {
-        let origin = match self.var_origin.get(&lit.abs()) {
-            Some(inst) => format!("qi#{inst}"),
-            None => "base".to_string(),
-        };
-        let sign = if lit < 0 { "¬" } else { "" };
-        let term = match self.solver_state.cnf_cache.var_map_reverse.get(&lit.abs()) {
-            Some(&uid) if !self.solver_state.get_term_safe(uid).is_none() => {
-                format!("{}", self.solver_state.get_term(uid))
-            }
-            _ => "?".to_string(),
-        };
-        format!("{lit}({origin}):{sign}{term}")
     }
 
     /// Materialize up to `cap` items from the current matching round.
@@ -359,27 +359,10 @@ impl<'a> CustomExternalPropagator<'a> {
 
     /// Refresh trigger matches only after every item from the previous matching
     /// round has been materialized.
-    fn start_quantifier_instantiation_round(
-        &mut self,
-        allow_skolemization: bool,
-        max_generation: Option<u32>,
-        relevant_only: bool,
-    ) -> bool {
+    fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
         debug_assert!(self.pending.is_none());
-        let relevant = match &mut self.relevancy {
-            Some(relevancy) if relevant_only => {
-                relevancy.sync_roots(self.solver_state, &self.assignments);
-                Some(relevancy.enodes())
-            }
-            _ => None,
-        };
-        let pending = instantiate_quantifiers(
-            self.solver_state,
-            &self.assignments,
-            allow_skolemization,
-            max_generation,
-            relevant,
-        );
+        let pending =
+            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
         if pending.is_empty() {
             return false;
         }
@@ -391,48 +374,41 @@ impl<'a> CustomExternalPropagator<'a> {
         true
     }
 
-    /// Add instances from the current partial assignment: find all trigger
-    /// matches and materialize every instance. Skolemization remains a
-    /// complete-model operation.
-    ///
-    /// Called from `cb_has_external_clause` whenever the clause queue is empty.
-    /// CaDiCaL keeps asking for external clauses until none are left before it
-    /// decides, so every decision is preceded by a round over the final
-    /// propagated e-graph. A round that finds only known matches adds nothing.
+    fn reset_eager_qi_for_level(&mut self) {
+        self.eager_qi.reset();
+    }
+
+    /// Add instances from the current partial assignment according to the
+    /// configured per-level eager mode. Skolemization remains a complete-model
+    /// operation.
     fn eagerly_instantiate_quantifiers(&mut self) {
-        if !self.eager_qi
-            || self.materializing_quantifiers
-            || !self.queued_clauses.borrow().is_empty()
-        {
+        if self.materializing_quantifiers || !self.disequalities.borrow().is_empty() {
             return;
         }
 
-        // A new matching round requires that no earlier round (e.g. one the
-        // complete-model check left partly materialized) is still pending.
-        self.materialize_pending(0);
-        if self.start_quantifier_instantiation_round(false, Some(self.max_qi_generation), true) {
-            self.materialize_pending(0);
+        match self.eager_qi.next_action() {
+            None => {}
+            Some(EagerQiAction::FullRound) => {
+                // Work from an earlier matching round must not be discarded or
+                // mixed with the one fresh round for this level.
+                self.materialize_pending(0);
+                if self.start_quantifier_instantiation_round(false) {
+                    self.materialize_pending(0);
+                }
+            }
+            Some(EagerQiAction::Bounded(budget)) => {
+                if self.pending.is_none() && !self.start_quantifier_instantiation_round(false) {
+                    return;
+                }
+                let materialized = self.materialize_pending(budget);
+                self.eager_qi.consume(materialized);
+            }
         }
     }
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
-        // The first batch after a new decision level starts with the decision
-        // literal if it is observed. CaDiCaL notifies even when nothing observed
-        // was assigned, so an empty batch means it decided an unobserved variable
-        // (e.g. a proof-only variable, which is in no clause and so propagates
-        // nothing); the next batch would then start with an unrelated literal.
-        if self.awaiting_decision {
-            self.awaiting_decision = false;
-            if trace_decisions() {
-                let decided = match lits.first() {
-                    Some(lit) => self.trace_lit(*lit),
-                    None => "<unobserved>".to_string(),
-                };
-                eprintln!("[decide] level={} {}", self.decision_level, decided);
-            }
-        }
         debug_println!(
             22,
             0,
@@ -537,8 +513,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     debug_println!(
                         14 - 3,
                         0,
-                        "In case 1 currently queued clauses: {:?}",
-                        self.queued_clauses.borrow()
+                        "In case 1 currently disequalities: {:?}",
+                        self.disequalities.borrow()
                     );
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
@@ -546,15 +522,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     debug_println!(
                         14 - 3,
                         0,
-                        "We have the following queued clauses: {:?}",
-                        self.queued_clauses.borrow()
+                        "We have the following disequalities: {:?}",
+                        self.disequalities.borrow()
                     );
                 }
             }
-        }
-
-        if let Some(relevancy) = &mut self.relevancy {
-            relevancy.on_assignments(lits, self.solver_state, &self.assignments);
         }
     }
 
@@ -568,7 +540,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level + 1
         );
         self.decision_level += 1;
-        self.awaiting_decision = true;
+        self.reset_eager_qi_for_level();
         // Record solver hash at new level
         while self.decision_level >= self.solver_state.hash_at_level.len() {
             self.solver_state
@@ -578,9 +550,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.solver_state.hash_at_level[self.decision_level] = self.solver_state.current_hash;
 
         self.solver_state.egraph.notify_new_decision_level();
-        if let Some(relevancy) = &mut self.relevancy {
-            relevancy.new_decision_level();
-        }
 
         #[cfg(feature = "z3-solver")]
         if let Some(z3) = self.z3_incremental.as_mut() {
@@ -613,19 +582,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        if trace_decisions() {
-            eprintln!("[backtrack] {} -> {}", self.decision_level, level);
-        }
         self.decision_level = level;
-        self.awaiting_decision = false;
+        self.reset_eager_qi_for_level();
 
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
-        if let Some(relevancy) = &mut self.relevancy {
-            relevancy.backtrack(level, self.solver_state, &self.assignments);
-        }
 
         #[cfg(feature = "z3-solver")]
         {
@@ -665,11 +628,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .collect::<Vec<_>>(),
         );
 
-        if !self.queued_clauses.borrow_mut().is_empty() {
+        if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
                 24,
                 0,
-                "Trying to check model when the queued clauses are not empty"
+                "Trying to check model when the disequalities are not empty"
             );
             self.stats.conflicts += 1;
             return false;
@@ -845,7 +808,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             ArithResult::None => {}
         }
 
-        if !self.queued_clauses.borrow().is_empty() {
+        if !self.disequalities.borrow().is_empty() {
             self.stats.conflicts += 1;
             return false;
         }
@@ -874,9 +837,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
-        if !self.start_quantifier_instantiation_round(true, None, false) {
+        if !self.start_quantifier_instantiation_round(true) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
-            assert!(self.queued_clauses.borrow().is_empty());
+            assert!(self.disequalities.borrow().is_empty());
             return true;
         }
 
@@ -936,12 +899,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             is_forgettable
         );
         self.propagate();
-        if (*self.queued_clauses.borrow_mut()).is_empty() {
+        if (*self.disequalities.borrow_mut()).is_empty() {
             false
         } else {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
-            let clause_len = self.queued_clauses.borrow().last().map_or(0, |c| c.len());
+            let clause_len = self.disequalities.borrow().last().map_or(0, |c| c.len());
             match clause_len {
                 0 | 1 => {} // don't count unit or empty clauses
                 2 => self.stats.binary_clauses += 1,
@@ -950,8 +913,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             debug_println!(
                 4,
                 0,
-                "In cb_has_external_clause: We have the following queued clauses: {:?}",
-                self.queued_clauses.borrow()[0]
+                "In cb_has_external_clause: We have the following disequalities: {:?}",
+                self.disequalities.borrow()[0]
             );
             true
         }
@@ -959,9 +922,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_add_external_clause_lit(&mut self) -> i32 {
         // For now, no external clauses
-        let mut v = self.queued_clauses.borrow_mut();
+        let mut v = self.disequalities.borrow_mut();
         assert!(!v.is_empty());
-        debug_println!(4, 0, "We start with the following queued clauses: {:?}", v);
+        debug_println!(4, 0, "We start with the following disequalities: {:?}", v);
         let last_index = v.len() - 1;
         debug_println!(11, 0, "We have the next clause {:?}", v[last_index]);
         let literal = if v[last_index].is_empty() {
