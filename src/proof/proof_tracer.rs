@@ -10,8 +10,9 @@ use std::cmp::Eq;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::ops::Neg;
-use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, SymbolQuote, Term};
+use std::io::{self, Write};
+use std::ops::{Neg, Range};
+use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, Sort, SortDef, Str, SymbolQuote, Term};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
@@ -20,10 +21,25 @@ pub struct SMTProofTracer {
     terms_list: HashMap<i32, (u64, Term, bool)>,
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
-    instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
     registered_clause_callbacks: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
+    /// CaDiCaL's LRAT information, which `write_edrat` uses to trim the proof to the clauses the
+    /// refutation depends on. Only recorded after [`SMTProofTracer::track_core`].
+    lrat: Option<Lrat>,
+    /// Proof steps that justify a later step but never reach CaDiCaL, keyed by that later step's
+    /// index. Trimming keeps them whenever it keeps the step.
+    premises: HashMap<usize, Range<usize>>,
+}
+
+#[derive(Default)]
+struct Lrat {
+    /// The normalized clause behind each CaDiCaL clause id (original and derived).
+    clause_by_id: HashMap<i64, Vec<i32>>,
+    /// The antecedent clause ids of each clause CaDiCaL derived.
+    antecedents: HashMap<i64, Vec<i64>>,
+    /// The clause ids `conclude_unsat` reported.
+    final_ids: Vec<i64>,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -160,34 +176,39 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
     }
 }
 
-fn collect_global_symbols(term: &Term, symbols: &mut HashSet<Str>) {
-    match term.repr() {
-        Global(qid, ..) | App(qid, ..) => {
+/// Collects the global symbols of `term`, visiting each shared subterm once, so it stays linear
+/// in the term's DAG size. `seen` can be reused across terms.
+fn collect_global_symbols(term: &Term, seen: &mut HashSet<u64>, symbols: &mut HashSet<Str>) {
+    let mut stack = vec![term.clone()];
+    while let Some(t) = stack.pop() {
+        if !seen.insert(t.uid()) {
+            continue;
+        }
+        if let Global(qid, ..) | App(qid, ..) = t.repr() {
             symbols.insert(qid.0.symbol.clone());
         }
-        _ => {}
-    }
-    for subterm in term.repr().sub_terms() {
-        collect_global_symbols(subterm, symbols);
+        stack.extend(t.repr().sub_terms().cloned());
     }
 }
 
-fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMeta)>>) -> String {
+/// Formats the declare-fun/define-fun commands of the symbol table. With `used`, only the
+/// symbols in it are declared, plus the definitions those depend on.
+fn format_function_declarations(
+    symbol_table: &HashMap<Str, Vec<(Sig, FunctionMeta)>>,
+    used: Option<&HashSet<Str>>,
+) -> String {
     let mut symbols = symbol_table.keys().collect::<Vec<_>>();
     symbols.sort_by_key(|symbol| symbol.to_string());
 
-    let mut output = String::new();
-    let mut definitions = Vec::new();
-    for symbol in symbols {
-        if matches!(
+    let is_definition = |symbol: &Str| {
+        matches!(
             symbol_table[symbol].as_slice(),
             [(Sig::ParFunc(..), FunctionMeta::Defined(_))]
-        ) {
-            definitions.push(symbol);
-        } else {
-            output.push_str(&format_function_declaration(symbol, &symbol_table[symbol]));
-        }
-    }
+        )
+    };
+    let (mut definitions, declarations): (Vec<_>, Vec<_>) = symbols
+        .into_iter()
+        .partition(|symbol| is_definition(symbol));
 
     let dependencies = definitions
         .iter()
@@ -197,10 +218,33 @@ fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMe
                 unreachable!();
             };
             let mut dependencies = HashSet::new();
-            collect_global_symbols(&meta.def.body, &mut dependencies);
+            collect_global_symbols(&meta.def.body, &mut HashSet::new(), &mut dependencies);
             (symbol.clone(), dependencies)
         })
         .collect::<HashMap<_, _>>();
+
+    // With `used`, keep its symbols and, transitively, what the kept definitions mention
+    let needed = used.map(|used| {
+        let mut needed = used.clone();
+        let mut stack: Vec<&Str> = used.iter().collect();
+        while let Some(symbol) = stack.pop() {
+            for dependency in dependencies.get(symbol).into_iter().flatten() {
+                if needed.insert(dependency.clone()) {
+                    stack.push(dependency);
+                }
+            }
+        }
+        needed
+    });
+    let is_needed = |symbol: &Str| needed.as_ref().is_none_or(|n| n.contains(symbol));
+
+    let mut output = String::new();
+    for symbol in declarations {
+        if is_needed(symbol) {
+            output.push_str(&format_function_declaration(symbol, &symbol_table[symbol]));
+        }
+    }
+    definitions.retain(|symbol| is_needed(symbol));
 
     let mut emitted = HashSet::new();
     while !definitions.is_empty() {
@@ -230,9 +274,32 @@ impl SMTProofTracer {
             terms_list: HashMap::new(),
             sorts,
             symbol_table,
-            instantiations_for_smt2: Vec::new(),
             registered_clause_callbacks: HashMap::new(),
             deleted_clauses: 0,
+            lrat: None,
+            premises: HashMap::new(),
+        }
+    }
+
+    /// Records CaDiCaL's clause ids and antecedents from now on, so that `write_edrat` can trim
+    /// the proof to the clauses the refutation depends on. Call before solving; it needs the
+    /// tracer to be connected with antecedents.
+    pub fn track_core(&mut self) {
+        self.lrat = Some(Lrat::default());
+    }
+
+    pub(crate) fn record_clause(&mut self, id: i64, clause: &[i32], antecedents: Option<&[i64]>) {
+        if let Some(lrat) = &mut self.lrat {
+            lrat.clause_by_id.insert(id, normalize_clause(clause));
+            if let Some(a) = antecedents {
+                lrat.antecedents.insert(id, a.to_vec());
+            }
+        }
+    }
+
+    pub(crate) fn record_conclusion(&mut self, clause_ids: &[i64]) {
+        if let Some(lrat) = &mut self.lrat {
+            lrat.final_ids = clause_ids.to_vec();
         }
     }
 
@@ -319,13 +386,13 @@ impl SMTProofTracer {
         self.get_lit_info(literal).is_some() || self.get_lit_info(-literal).is_some()
     }
 
-    /// Emits definitions for the literals in `clause`.
+    /// Reports the definitions of the literals in `clause` to `visit`.
     fn introduce_literals(
         &self,
         literals_defined: &mut HashSet<i32>,
         clause: &[i32],
-        out: &mut String,
-    ) {
+        visit: &mut impl FnMut(ProofItem<'_>) -> io::Result<()>,
+    ) -> io::Result<()> {
         for &lit in clause {
             debug_println!(12, 2, "Introducing the literal {}", lit);
             if let Some((lit, _id, term, polarity)) = self.get_lit_info(lit) {
@@ -341,9 +408,8 @@ impl SMTProofTracer {
                     polarized_term
                 );
 
-                if !literals_defined.contains(&lit) {
-                    out.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
-                    literals_defined.insert(lit);
+                if literals_defined.insert(lit) {
+                    visit(ProofItem::Literal(lit, polarized_term))?;
                 }
             } else {
                 panic!(
@@ -352,6 +418,7 @@ impl SMTProofTracer {
                 );
             }
         }
+        Ok(())
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -408,9 +475,15 @@ impl SMTProofTracer {
             self.register_term(child_literal, child, true);
 
             // Derive `imp` through modus ponens via Boolean reasoning
+            let first_premise = self.proof_steps.len();
             self.push_step(&child_imp, typ);
             self.add_theory_clause(&equiv_imp, Theory::Boolean);
+            let premises = first_premise..self.proof_steps.len();
             self.add_sat_clause(&imp);
+            // Only `imp` reaches CaDiCaL, so a trimmed proof must keep its premises with it
+            if self.proof_steps.len() > premises.end {
+                self.premises.insert(premises.end, premises);
+            }
 
             // Delete any clauses mentioning the un-reduced child
             self.record_deletion(&child_imp);
@@ -418,31 +491,86 @@ impl SMTProofTracer {
         }
     }
 
-    /// Generate eDRAT proof as a string
-    pub fn generate_edrat(&mut self) -> String {
-        let mut output = String::new();
-        self.instantiations_for_smt2.clear(); // Clear previous instantiations
-        let mut literals_defined: HashSet<i32> = HashSet::new();
-
-        // emit the sorts, datatypes, and the symbol table
-        for (sort, sort_def) in &self.sorts {
-            output.push_str(&format_sort_declaration(sort, sort_def));
+    /// Marks the proof steps that a trimmed proof keeps: those whose clause is in the antecedent
+    /// closure of the clauses `conclude_unsat` reported, the proof-only premises of those steps,
+    /// and the final empty clause. Deletions are dropped, since every kept clause stays needed.
+    ///
+    /// Returns `None` when the recorded LRAT information cannot justify trimming (no core was
+    /// tracked, or the closure reaches a clause id or content the tracer does not know); the
+    /// caller then writes the whole proof.
+    fn core_steps(&self) -> Option<Vec<bool>> {
+        let lrat = self
+            .lrat
+            .as_ref()
+            .filter(|lrat| !lrat.final_ids.is_empty())?;
+        let mut core: HashSet<&[i32]> = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut stack = lrat.final_ids.clone();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let clause = lrat.clause_by_id.get(&id)?;
+            core.insert(clause.as_slice());
+            if let Some(antecedents) = lrat.antecedents.get(&id) {
+                // A derived clause without antecedents cannot be justified from the core alone
+                if antecedents.is_empty() && !clause.is_empty() {
+                    return None;
+                }
+                stack.extend(antecedents.iter().map(|a| a.abs()));
+            }
         }
 
-        let datatype_string = format_datatype_declaration(&self.sorts);
-        output.push_str(&datatype_string);
+        let mut keep = vec![false; self.proof_steps.len()];
+        let mut found: HashSet<&[i32]> = HashSet::new();
+        for (i, step) in self.proof_steps.iter().enumerate() {
+            match step.typ {
+                ProofStepType::Deletion => {}
+                ProofStepType::SATClause if step.clause.is_empty() => {
+                    keep[i] = true;
+                    break;
+                }
+                _ => {
+                    if let Some(c) = core.get(normalize_clause(&step.clause).as_slice()) {
+                        keep[i] = true;
+                        found.insert(c);
+                    }
+                }
+            }
+        }
+        if found.len() + usize::from(core.contains(&[][..])) < core.len() {
+            debug_println!(2, 0, "eDRAT: a core clause has no proof step; not trimming");
+            return None;
+        }
+        // Premises are never derived steps themselves, so one pass closes over them
+        for (&step, premises) in &self.premises {
+            if keep[step] {
+                keep[premises.clone()].fill(true);
+            }
+        }
+        Some(keep)
+    }
 
-        output.push_str(&format_function_declarations(&self.symbol_table));
-
-        // Depending on the proof step, introduce new eDRAT literals
-        for step in &self.proof_steps {
+    /// Walks the proof in order and reports, for every step that is written, the literal
+    /// definitions and Skolem declarations it needs and then the step itself. `keep` restricts
+    /// the walk to the marked steps. Stops after the empty clause.
+    fn visit_proof(
+        &self,
+        keep: Option<&[bool]>,
+        mut visit: impl FnMut(ProofItem<'_>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut literals_defined: HashSet<i32> = HashSet::new();
+        for (i, step) in self.proof_steps.iter().enumerate() {
+            if keep.is_some_and(|k| !k[i]) {
+                continue;
+            }
             let clause = &step.clause;
             let typ = &step.typ;
             match typ {
                 ProofStepType::OriginalClause
                 | ProofStepType::TheoryClause(..)
                 | ProofStepType::Instantiation => {
-                    self.introduce_literals(&mut literals_defined, clause, &mut output)
+                    self.introduce_literals(&mut literals_defined, clause, &mut visit)?
                 }
                 ProofStepType::Skolemization {
                     parent_term,
@@ -459,53 +587,215 @@ impl SMTProofTracer {
                     self.introduce_literals(
                         &mut literals_defined,
                         std::slice::from_ref(parent_term),
-                        &mut output,
-                    );
+                        &mut visit,
+                    )?;
                     for (i, var) in skolem_vars.iter().enumerate() {
                         // CC TODO think about negated parent term, if (negated forall)
-                        output.push_str(&format!(
-                            "(declare-skolem {} {} {} {})\n",
-                            parent_term, i, var.0, var.1
-                        ));
+                        visit(ProofItem::Skolem(*parent_term, i, var))?;
                     }
-                    self.introduce_literals(&mut literals_defined, clause, &mut output);
+                    self.introduce_literals(&mut literals_defined, clause, &mut visit)?;
                 }
                 _ => {}
             }
 
-            step.push_line_to(&mut output);
+            visit(ProofItem::Step(step))?;
 
             // Stop adding proof steps to the output once the empty clause is derived
             if matches!(typ, ProofStepType::SATClause) && clause.is_empty() {
                 break;
             }
         }
-        output
+        Ok(())
     }
+
+    /// Writes the eDRAT proof to `out`, streaming it rather than building it in memory.
+    ///
+    /// With `trim`, and when the solver tracked a core (see [`SMTProofTracer::track_core`]), only
+    /// the steps the refutation depends on are written, together with the literals and the
+    /// function declarations they use. Otherwise every step is written.
+    pub fn write_edrat(&self, out: &mut impl Write, trim: bool) -> io::Result<()> {
+        let keep = if trim { self.core_steps() } else { None };
+
+        // A trimmed proof only declares the functions its literal terms mention
+        let used_symbols = keep.as_deref().map(|keep| {
+            let mut symbols = HashSet::new();
+            let mut seen = HashSet::new();
+            let _ = self.visit_proof(Some(keep), |item| {
+                if let ProofItem::Literal(_, term) = item {
+                    collect_global_symbols(&term, &mut seen, &mut symbols);
+                }
+                Ok(())
+            });
+            symbols
+        });
+
+        // emit the sorts, datatypes, and the symbol table
+        for (sort, sort_def) in &self.sorts {
+            out.write_all(format_sort_declaration(sort, sort_def).as_bytes())?;
+        }
+        out.write_all(format_datatype_declaration(&self.sorts).as_bytes())?;
+        out.write_all(
+            format_function_declarations(&self.symbol_table, used_symbols.as_ref()).as_bytes(),
+        )?;
+
+        self.visit_proof(keep.as_deref(), |item| match item {
+            ProofItem::Literal(lit, term) => writeln!(out, "(edrat-literal {lit} {term})"),
+            ProofItem::Skolem(parent, i, var) => {
+                writeln!(out, "(declare-skolem {} {} {} {})", parent, i, var.0, var.1)
+            }
+            ProofItem::Step(step) => step.write_line_to(out),
+        })
+    }
+
+    /// Generates the whole (untrimmed) eDRAT proof as a string.
+    #[cfg(test)]
+    pub(crate) fn generate_edrat(&self) -> String {
+        let mut out = Vec::new();
+        self.write_edrat(&mut out, false)
+            .expect("writing to a Vec cannot fail");
+        String::from_utf8(out).expect("eDRAT proofs are UTF-8")
+    }
+}
+
+/// One line-producing element of an eDRAT proof, as reported by `SMTProofTracer::visit_proof`.
+enum ProofItem<'a> {
+    /// `(edrat-literal <lit> <term>)`
+    Literal(i32, Term),
+    /// `(declare-skolem <parent> <index> <name> <sort>)`
+    Skolem(i32, usize, &'a (Str, Sort)),
+    /// A clause line
+    Step(&'a ProofStep),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::quantifiers::skolem::skolemize;
+    use cadical_sys::ProofTracer;
     use yaspar_ir::ast::{ACommand, Context, Typecheck};
     use yaspar_ir::untyped::UntypedAst;
 
-    fn parse_assertion(script: &str) -> (Context, Term) {
+    /// Parses `script` and returns its context and its assertions, in order.
+    fn parse_assertions(script: &str) -> (Context, Vec<Term>) {
         let mut context = Context::new();
         let commands = UntypedAst
             .parse_script_str(script)
             .unwrap()
             .type_check(&mut context)
             .unwrap();
-        let assertion = commands
+        let assertions = commands
             .iter()
-            .find_map(|command| match command.repr() {
+            .filter_map(|command| match command.repr() {
                 ACommand::Assert(term) => Some(term.clone()),
                 _ => None,
             })
-            .unwrap();
-        (context, assertion)
+            .collect();
+        (context, assertions)
+    }
+
+    /// A tracer over the sorts and symbols of `context`.
+    fn tracer_for(context: &Context) -> SMTProofTracer {
+        SMTProofTracer::new(
+            context
+                .expose_sorts()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            context
+                .expose_symbol_table()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// A tracer that tracks a core, with the Boolean constants `p`, `q`, `r` as literals 1, 2, 3.
+    fn pqr_tracer() -> (SMTProofTracer, Vec<Term>) {
+        let (context, terms) = parse_assertions(
+            "(declare-const p Bool) (declare-const q Bool) (declare-const r Bool)
+             (assert p) (assert q) (assert r)",
+        );
+        let mut tracer = tracer_for(&context);
+        for (i, term) in terms.iter().enumerate() {
+            tracer.register_term(i as i32 + 1, term, true);
+        }
+        tracer.track_core();
+        (tracer, terms)
+    }
+
+    /// Records `clause` the way `add_clause_to_proof_and_solver` does, then reports it to the
+    /// tracer as CaDiCaL would, under clause id `id`.
+    fn add_input_clause(tracer: &mut SMTProofTracer, id: i64, clause: &[i32]) {
+        tracer.add_original_clause(clause);
+        tracer.register_clause_for_cadical_callback(clause);
+        ProofTracer::add_original_clause(tracer, id, false, clause, false);
+    }
+
+    fn trimmed(tracer: &SMTProofTracer) -> String {
+        let mut out = Vec::new();
+        tracer.write_edrat(&mut out, true).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn trims_proof_to_lrat_core() {
+        let (mut tracer, _) = pqr_tracer();
+        add_input_clause(&mut tracer, 1, &[1]);
+        add_input_clause(&mut tracer, 2, &[-1, 2]);
+        add_input_clause(&mut tracer, 3, &[3]);
+        add_input_clause(&mut tracer, 4, &[-2]);
+        ProofTracer::add_derived_clause(&mut tracer, 5, false, 0, &[], &[1, 2, 4]);
+        ProofTracer::delete_clause(&mut tracer, 3, false, &[3]);
+        ProofTracer::conclude_unsat(&mut tracer, 0, &[5]);
+
+        let full = tracer.generate_edrat();
+        assert!(full.contains("a 3 0\n") && full.contains("(declare-fun r () Bool)"));
+
+        let proof = trimmed(&tracer);
+        assert_eq!(
+            proof,
+            "(declare-fun p () Bool)\n(declare-fun q () Bool)\n\
+             (edrat-literal 1 p)\na 1 0\n(edrat-literal 2 q)\na -1 2 0\na -2 0\n0\n"
+        );
+    }
+
+    #[test]
+    fn trimming_keeps_premises_of_derived_instances() {
+        let (mut tracer, terms) = pqr_tracer();
+        // 1 => 2 is an instance, 2 <=> 3 its reduction; only 1 => 3 reaches CaDiCaL
+        tracer.push_skolem_or_instantiation_derivation(
+            1,
+            2,
+            &terms[1],
+            3,
+            &terms[2],
+            ProofStepType::Instantiation,
+        );
+        tracer.register_clause_for_cadical_callback(&[-1, 3]);
+        ProofTracer::add_original_clause(&mut tracer, 1, false, &[-1, 3], false);
+        add_input_clause(&mut tracer, 2, &[1]);
+        add_input_clause(&mut tracer, 3, &[-3]);
+        ProofTracer::add_derived_clause(&mut tracer, 4, false, 0, &[], &[1, 2, 3]);
+        ProofTracer::conclude_unsat(&mut tracer, 0, &[4]);
+
+        let proof = trimmed(&tracer);
+        for line in [
+            "q -1 2 0\n",
+            "t b -2 3 0\n",
+            "\n-1 3 0\n",
+            "a 1 0\n",
+            "a -3 0\n",
+        ] {
+            assert!(proof.contains(line), "missing {line:?} in\n{proof}");
+        }
+        assert!(!proof.contains("\nd "), "deletions are dropped:\n{proof}");
+        assert!(proof.ends_with("\n0\n"));
+    }
+
+    #[test]
+    fn trimming_falls_back_to_full_proof_without_core() {
+        let (mut tracer, _) = pqr_tracer();
+        add_input_clause(&mut tracer, 1, &[1]);
+        // no conclude_unsat: nothing to trim against
+        assert_eq!(trimmed(&tracer), tracer.generate_edrat());
     }
 
     #[test]
@@ -515,25 +805,8 @@ mod tests {
 (define-fun z ((x Int)) Int (+ x base))
 (define-fun a ((x Int)) Int (z (z x)))
 ";
-        let mut context = Context::new();
-        UntypedAst
-            .parse_script_str(script)
-            .unwrap()
-            .type_check(&mut context)
-            .unwrap();
-
-        let mut tracer = SMTProofTracer::new(
-            context
-                .expose_sorts()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            context
-                .expose_symbol_table()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
-
-        let proof = tracer.generate_edrat();
+        let (context, _) = parse_assertions(script);
+        let proof = tracer_for(&context).generate_edrat();
         let declaration = proof.find("(declare-fun base () Int)").unwrap();
         let dependency = proof.find("(define-fun z ").unwrap();
         let dependent = proof.find("(define-fun a ").unwrap();
@@ -544,21 +817,13 @@ mod tests {
     #[test]
     fn introduces_skolem_parent_before_declaration_and_child_after() {
         let script = "(assert (exists ((x Int)) (> x 0)))";
-        let (mut context, parent) = parse_assertion(script);
-        let (child, skolem_vars) = skolemize(&parent, &mut context, true);
+        let (mut context, assertions) = parse_assertions(script);
+        let parent = &assertions[0];
+        let (child, skolem_vars) = skolemize(parent, &mut context, true);
         let skolem_name = skolem_vars[0].0.to_string();
 
-        let mut tracer = SMTProofTracer::new(
-            context
-                .expose_sorts()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            context
-                .expose_symbol_table()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
-        tracer.register_term(1, &parent, true);
+        let mut tracer = tracer_for(&context);
+        tracer.register_term(1, parent, true);
         tracer.register_term(2, &child, true);
         tracer.push_step(
             &[-1, 2],
