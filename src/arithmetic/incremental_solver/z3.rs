@@ -149,16 +149,6 @@ impl Z3IncrementalState {
     }
 
     fn expr_to_z3(&self, expr: &ArithExpr) -> Int {
-        // A bare var, e.g. a side of an atom, stays `var_N` rather than
-        // `0 + 1 * var_N`
-        if let [(var, coeff)] = expr.terms.as_slice()
-            && *coeff == IBig::from(1)
-            && expr.constant == IBig::from(0)
-            && expr.divs.is_empty()
-            && expr.mods.is_empty()
-        {
-            return self.get_var(*var).clone();
-        }
         let mut result = Int::from_big_int(&ibig_to_bigint(&expr.constant));
         for (var, coeff) in &expr.terms {
             let v = self.get_var(*var);

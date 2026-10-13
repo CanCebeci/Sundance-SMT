@@ -177,11 +177,7 @@ impl ArithTranslator {
         var_id
     }
 
-    /// Extract an ArithConstraint from a SAT literal `(op t1 t2)`, comparing the
-    /// vars of `t1` and `t2`, whose definitions give their linear expressions.
-    /// None if not an arithmetic inequality. Equality atoms are intentionally
-    /// rejected — the egraph is the single source of truth for equalities
-    /// (positive → merges via `drain_merges`; negative → egraph disequalities).
+    /// Extract an ArithConstraint from a SAT literal. None if not arithmetic.
     pub fn extract_constraint(
         &mut self,
         lit: i32,
@@ -199,11 +195,10 @@ impl ArithTranslator {
         if args.len() != 2 {
             return None;
         }
-        // Only sides that are linear arithmetic make an arithmetic literal
-        extract_lazy_expression(args[0].uid(), solver_state)?;
-        extract_lazy_expression(args[1].uid(), solver_state)?;
-        let left = self.side_expr(args[0].uid(), solver_state);
-        let right = self.side_expr(args[1].uid(), solver_state);
+        let left_map = extract_lazy_expression(args[0].uid(), solver_state)?;
+        let right_map = extract_lazy_expression(args[1].uid(), solver_state)?;
+        let left = self.coeff_map_to_expr(&left_map, solver_state);
+        let right = self.coeff_map_to_expr(&right_map, solver_state);
         let constraint = match (identifier.0.symbol.as_str(), polarity) {
             ("<=", true) => ArithConstraint::Leq(left, right),
             ("<=", false) => ArithConstraint::Lt(right, left),
@@ -216,18 +211,6 @@ impl ArithTranslator {
             _ => return None,
         };
         Some(constraint)
-    }
-
-    /// The expression `1 * var_t` for a side `t` of an arithmetic atom.
-    fn side_expr(&mut self, solver_uid: u64, solver_state: &mut SolverState) -> ArithExpr {
-        let egraph_id = solver_state.to_egraph_id(solver_uid);
-        let var = self.get_or_register_var_internal(egraph_id, solver_state);
-        ArithExpr {
-            terms: vec![(var, IBig::from(1))],
-            constant: IBig::from(0),
-            divs: Vec::new(),
-            mods: Vec::new(),
-        }
     }
 
     /// Internalize the arithmetic known before the search at level 0, so that
