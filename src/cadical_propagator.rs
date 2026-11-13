@@ -655,8 +655,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        if planner_trace() {
-            eprintln!("; backtrack {} -> {}", self.decision_level, level);
+        // Each decision level is one decision, so this undoes the last n decisions
+        if planner_trace() && level < self.decision_level {
+            eprintln!(
+                "[backtrack] {}; level={} -> {level}",
+                self.decision_level - level,
+                self.decision_level
+            );
         }
         self.decision_level = level;
         self.awaiting_decision = false;
