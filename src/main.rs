@@ -32,7 +32,7 @@ fn main() -> Result<(), String> {
          --partial-proof for a dump on any result)."
     );
 
-    log::set_trace_decisions(args.trace_decisions);
+    log::set_planner_trace(args.planner_trace);
     log::set_trace_relevancy(args.trace_relevancy);
 
     // Parse debug flag and level

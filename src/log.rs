@@ -18,15 +18,16 @@ pub fn is_important(importance: u8) -> bool {
     get_debug_level() <= importance
 }
 
-/// Whether to trace CDCL decisions, quantifier instances and backtracks
-static TRACE_DECISIONS: AtomicBool = AtomicBool::new(false);
+/// Whether to emit the planner trace (decisions, quantifier instances and
+/// backtracks in the standard solver tracing format)
+static PLANNER_TRACE: AtomicBool = AtomicBool::new(false);
 
-pub fn set_trace_decisions(enabled: bool) {
-    TRACE_DECISIONS.store(enabled, Ordering::SeqCst);
+pub fn set_planner_trace(enabled: bool) {
+    PLANNER_TRACE.store(enabled, Ordering::SeqCst);
 }
 
-pub fn trace_decisions() -> bool {
-    TRACE_DECISIONS.load(Ordering::Relaxed)
+pub fn planner_trace() -> bool {
+    PLANNER_TRACE.load(Ordering::Relaxed)
 }
 
 /// Whether to trace the relevant e-nodes of each eager matching round

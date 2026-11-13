@@ -82,9 +82,10 @@ pub struct Args {
     /// Print solver statistics after solving
     #[arg(long, default_value_t = false)]
     pub stats: bool,
-    /// Trace decisions, eager/lazy quantifier instances and backtracks to stderr
+    /// Print a planner trace (decisions and quantifier instances in the
+    /// standard solver tracing format; other events as comments) to stderr
     #[arg(long, default_value_t = false)]
-    pub trace_decisions: bool,
+    pub planner_trace: bool,
     /// Trace the relevant e-nodes of each `--relevancy` matching round to stderr
     #[arg(long, default_value_t = false)]
     pub trace_relevancy: bool,

@@ -10,7 +10,7 @@ use std::rc::Rc;
 use crate::arithmetic::simplify::ArithSimplify;
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
-use crate::log::trace_relevancy;
+use crate::log::{planner_trace, trace_relevancy};
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
@@ -26,6 +26,10 @@ pub(crate) enum QuantifierInstance {
     Instantiation {
         clauses: Vec<Vec<i32>>,
         generation: u32,
+        /// Solver UID of the instantiated quantifier
+        quantifier_id: u64,
+        /// The match's bindings in variable declaration order (only with `--planner-trace`)
+        bindings: Vec<Term>,
     },
     Skolemization {
         clauses: Vec<Vec<i32>>,
@@ -39,6 +43,7 @@ struct DeferredInstantiation {
     quantifier_id: u64,
     /// One more than the largest generation among the match's bindings
     generation: u32,
+    bindings: Vec<Term>,
 }
 
 struct DeferredSkolemization {
@@ -199,6 +204,14 @@ pub(crate) fn instantiate_quantifiers(
                     .or_default()
                     .insert(subs.clone());
 
+                // Locals order by binder id, i.e. declaration order
+                let bindings = if planner_trace() {
+                    let mut sorted: Vec<_> = subs.iter().collect();
+                    sorted.sort_by(|a, b| a.0.cmp(b.0));
+                    sorted.into_iter().map(|(_, t)| t.clone()).collect()
+                } else {
+                    vec![]
+                };
                 let term = solver_state.get_term(body);
                 let substitution = Substitution::new(subs);
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
@@ -208,6 +221,7 @@ pub(crate) fn instantiate_quantifiers(
                     literal: quantifier_literal,
                     quantifier_id: quantifier.id,
                     generation,
+                    bindings,
                 });
             }
         }
@@ -358,6 +372,7 @@ fn process_deferred_instantiations(
         literal,
         quantifier_id,
         generation,
+        bindings,
     } in deferred_instantiations
     {
         let t = if is_exists {
@@ -460,6 +475,8 @@ fn process_deferred_instantiations(
         results.push(QuantifierInstance::Instantiation {
             clauses,
             generation,
+            quantifier_id,
+            bindings,
         });
     }
     results
