@@ -30,6 +30,25 @@ pub fn planner_trace() -> bool {
     PLANNER_TRACE.load(Ordering::Relaxed)
 }
 
+/// Planner trace `[eq] <lhs> <rhs>; <comment>`: the two closed terms are equal
+/// (equivalent, for Bool). Emitted for rewrites and for e-graph merges.
+/// Skipped when both sides print the same, since that says nothing.
+pub fn planner_trace_eq(lhs: &impl std::fmt::Display, rhs: &impl std::fmt::Display, comment: &str) {
+    if !planner_trace() {
+        return;
+    }
+    let (lhs, rhs) = (lhs.to_string(), rhs.to_string());
+    if lhs != rhs {
+        eprintln!("[eq] {lhs} {rhs}; {comment}");
+    }
+}
+
+/// Planner trace `[eq] <fml> true`: a formula the solver now holds without a
+/// rewrite source, e.g. a definition introduced by preprocessing.
+pub fn planner_trace_fact(fml: &impl std::fmt::Display, comment: &str) {
+    planner_trace_eq(fml, &"true", comment);
+}
+
 /// Whether to trace the relevant e-nodes of each eager matching round
 static TRACE_RELEVANCY: AtomicBool = AtomicBool::new(false);
 

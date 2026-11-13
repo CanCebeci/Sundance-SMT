@@ -12,6 +12,7 @@ use yaspar_ir::ast::{FetchSort, ObjectAllocatorExt, Repr, Term};
 use crate::cnf::CNFConversion as _;
 use crate::datatypes::axioms::find_datatype_axioms;
 use crate::debug_println;
+use crate::log::{planner_trace_eq, planner_trace_fact};
 use crate::solver_state::SolverState;
 use crate::utils::DeterministicHashSet;
 
@@ -49,6 +50,7 @@ pub fn check_for_function_bool(
         );
         if !solver_state.cnf_cache.var_map.contains_key(&term.uid()) {
             let nnf_term = term.nnf(solver_state);
+            planner_trace_eq(term, &nnf_term, "nnf");
             let cnf_formula = term.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
 
             solver_state.insert_predecessor(&nnf_term, None, None, from_quantifier); // todo: I think its right to have a from_quantifier here
@@ -423,6 +425,7 @@ fn process_ite(
 
         let ite_axioms = solver_state.and(vec![imp1, imp2]);
         let ite_axioms_nnf = ite_axioms.nnf(solver_state);
+        planner_trace_fact(&ite_axioms_nnf, "ite");
         solver_state.insert_predecessor(&ite_axioms_nnf, None, None, from_quantifier);
         Some(ite_axioms_nnf.cnf_tseitin(solver_state))
     } else {

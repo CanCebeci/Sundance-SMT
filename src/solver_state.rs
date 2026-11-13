@@ -859,7 +859,15 @@ pub fn process_assignment(
 
             let et1 = solver_state.to_egraph_id(t1);
             let et2 = solver_state.to_egraph_id(t2);
+            let merges = solver_state.egraph.find(et1) != solver_state.egraph.find(et2);
             let union_result = solver_state.egraph.assert_equal(et1, et2);
+            if merges && union_result.conflict.is_none() {
+                crate::log::planner_trace_eq(
+                    &solver_state.get_term(t1),
+                    &solver_state.get_term(t2),
+                    &format!("merge level={level} literal"),
+                );
+            }
             if let Some(conflict) = union_result.conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities

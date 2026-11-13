@@ -126,6 +126,8 @@ fn main() -> Result<(), String> {
 
         let nnf_term = skolemized_term.nnf(&mut solver_state);
         debug_println!(12, 0, "NNF form: {}", nnf_term,);
+        // let/define-fun expansion is not reported: trace consumers expand the input themselves
+        log::planner_trace_eq(&skolemized_term, &nnf_term, "nnf");
 
         input_nnf_terms.push(nnf_term);
     }
@@ -147,6 +149,11 @@ fn main() -> Result<(), String> {
             Some(counts) => flatten_clauses(&input_nnf_term, counts, &mut solver_state.context),
             None => vec![input_nnf_term],
         };
+        if clauses.len() > 1 {
+            for clause in &clauses {
+                log::planner_trace_fact(clause, "flatten");
+            }
+        }
         for nnf_term in clauses {
             nnf_terms.push(nnf_term.clone());
             solver_state.relevancy_roots.push((0, nnf_term.clone()));

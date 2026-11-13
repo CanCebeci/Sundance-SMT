@@ -10,7 +10,7 @@ use std::rc::Rc;
 use crate::arithmetic::simplify::ArithSimplify;
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
-use crate::log::{planner_trace, trace_relevancy};
+use crate::log::{planner_trace, planner_trace_eq, planner_trace_fact, trace_relevancy};
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
@@ -300,6 +300,16 @@ fn process_deferred_skolemizations(
         debug_println!(26, 0, "(assert {})", reduced_skolem);
 
         let quantifier_dimacs_literal = if is_exists { literal } else { -literal };
+        if planner_trace() {
+            // The skolemized body holds whenever the quantifier literal does
+            let q = solver_state.get_term_from_lit(quantifier_dimacs_literal.abs());
+            let guard = if quantifier_dimacs_literal > 0 {
+                q.to_string()
+            } else {
+                format!("(not {q})")
+            };
+            planner_trace_fact(&format!("(=> {guard} {reduced_skolem})"), "skolem");
+        }
         solver_state
             .relevancy_roots
             .push((quantifier_dimacs_literal, reduced_skolem.clone()));
@@ -400,6 +410,7 @@ fn process_deferred_instantiations(
         };
 
         let nnf_term = simplified_term.nnf(solver_state);
+        planner_trace_eq(&t, &nnf_term, "instance");
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
