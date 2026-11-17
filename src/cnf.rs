@@ -167,11 +167,10 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                             .map(|t| t.nnf_impl(env, polarity))
                             .collect::<Vec<_>>();
                         if polarity {
-                            // env.context.flat_and(nts)
-                            env.context.and(nts)
+                            mk_and(env.context, nts)
                         } else {
                             // notice that `(not (and a b))` is `(or (not a) (not b))`
-                            env.context.or(nts)
+                            mk_or(env.context, nts)
                         }
                     }
                 }
@@ -186,12 +185,10 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                             .map(|t| t.nnf_impl(env, polarity))
                             .collect::<Vec<_>>();
                         if polarity {
-                            // env.context.flat_or(nts)
-                            env.context.or(nts)
+                            mk_or(env.context, nts)
                         } else {
                             // notice that `(not (or a b))` is `(and (not a) (not b))`
-                            // env.context.flat_and(nts)
-                            env.context.and(nts)
+                            mk_and(env.context, nts)
                         }
                     }
                 }
@@ -202,11 +199,9 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                 let nb = b.nnf_impl(env, polarity);
                 nts.push(nb);
                 if polarity {
-                    // env.context.flat_or(nts)
-                    env.context.or(nts)
+                    mk_or(env.context, nts)
                 } else {
-                    // env.context.flat_and(nts)
-                    env.context.and(nts)
+                    mk_and(env.context, nts)
                 }
             }
             ATerm::Not(t) => t.nnf_impl(env, !polarity),
@@ -353,6 +348,40 @@ where
                 }
             })
             .collect()
+    }
+}
+
+/// `(and ts)` with Boolean constants folded, as Z3's rewriter does: `false`
+/// if some conjunct is `false`, without the `true` conjuncts otherwise, and the
+/// conjunct itself if only one is left (`true` if none). E.g. Verus's
+/// `(=> %%location_label%%5 true)` would otherwise leave the label as an atom
+/// that only a decision can assign.
+fn mk_and(context: &mut Context, ts: Vec<Term>) -> Term {
+    let t = context.get_true();
+    let f = context.get_false();
+    if ts.contains(&f) {
+        return f;
+    }
+    let mut ts: Vec<Term> = ts.into_iter().filter(|x| *x != t).collect();
+    match ts.len() {
+        0 => t,
+        1 => ts.pop().unwrap(),
+        _ => context.and(ts),
+    }
+}
+
+/// `(or ts)` with Boolean constants folded (dual of `mk_and`)
+fn mk_or(context: &mut Context, ts: Vec<Term>) -> Term {
+    let t = context.get_true();
+    let f = context.get_false();
+    if ts.contains(&t) {
+        return t;
+    }
+    let mut ts: Vec<Term> = ts.into_iter().filter(|x| *x != f).collect();
+    match ts.len() {
+        0 => f,
+        1 => ts.pop().unwrap(),
+        _ => context.or(ts),
     }
 }
 
