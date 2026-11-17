@@ -33,6 +33,9 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
+        if crate::log::trace_conflicts() {
+            self.learned_to_trace.push(clause.to_vec());
+        }
         self.add_sat_clause(clause);
     }
 

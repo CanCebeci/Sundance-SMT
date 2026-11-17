@@ -60,6 +60,17 @@ pub fn trace_relevancy() -> bool {
     TRACE_RELEVANCY.load(Ordering::Relaxed)
 }
 
+/// Whether to trace theory clauses, reasons and learned clauses (as comments)
+static TRACE_CONFLICTS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_trace_conflicts(enabled: bool) {
+    TRACE_CONFLICTS.store(enabled, Ordering::SeqCst);
+}
+
+pub fn trace_conflicts() -> bool {
+    TRACE_CONFLICTS.load(Ordering::Relaxed)
+}
+
 /// Debug macro -> used to print debug statements
 #[macro_export]
 macro_rules! debug_println {

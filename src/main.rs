@@ -34,6 +34,7 @@ fn main() -> Result<(), String> {
 
     log::set_planner_trace(args.planner_trace);
     log::set_trace_relevancy(args.trace_relevancy);
+    log::set_trace_conflicts(args.trace_conflicts);
 
     // Parse debug flag and level
     if args.debug > 0 {

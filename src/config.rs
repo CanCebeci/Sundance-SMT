@@ -89,6 +89,10 @@ pub struct Args {
     /// Trace the relevant e-nodes of each `--relevancy` matching round to stderr
     #[arg(long, default_value_t = false)]
     pub trace_relevancy: bool,
+    /// Trace theory clauses, propagation reasons and learned clauses to stderr, as
+    /// planner-trace comments with each literal's level
+    #[arg(long, default_value_t = false)]
+    pub trace_conflicts: bool,
     /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,

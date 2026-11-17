@@ -31,6 +31,9 @@ pub struct SMTProofTracer {
     registered_clause_callbacks: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
+    /// With `--trace-conflicts`, clauses CaDiCaL learned since the propagator
+    /// last traced them
+    pub(crate) learned_to_trace: Vec<Vec<i32>>,
     /// Next literal handed out by [`Self::new_proof_only_literal`]
     next_proof_only_literal: i32,
 }
@@ -242,6 +245,7 @@ impl SMTProofTracer {
             instantiations_for_smt2: Vec::new(),
             registered_clause_callbacks: HashMap::new(),
             deleted_clauses: 0,
+            learned_to_trace: Vec::new(),
             next_proof_only_literal: PROOF_ONLY_LITERAL_BASE,
         }
     }

@@ -8,7 +8,7 @@ use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::{Comparison, Conflict, Propagation};
-use crate::log::{is_important, planner_trace};
+use crate::log::{is_important, planner_trace, trace_conflicts};
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
@@ -319,7 +319,41 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     /// Queues a clause whose proof step has already been recorded.
+    /// `; <kind>: <lit>@<level> ...` with `--trace-conflicts` (`@-` if unassigned)
+    fn trace_clause(&self, kind: &str, clause: &[i32]) {
+        if !trace_conflicts() {
+            return;
+        }
+        let lits: Vec<String> = clause
+            .iter()
+            .map(|&l| {
+                let level = match self.assignments.get(l.unsigned_abs() as usize) {
+                    Some(&a) if a != 0 => (a.abs() - 1).to_string(),
+                    _ => "-".to_string(),
+                };
+                format!("{}@{level}", self.trace_lit(l))
+            })
+            .collect();
+        eprintln!("; {kind} (level={}): {}", self.decision_level, lits.join(" \u{2228} "));
+    }
+
+    /// Trace the clauses CaDiCaL learned since the last call
+    fn trace_learned(&self) {
+        if !trace_conflicts() {
+            return;
+        }
+        let learned = std::mem::take(&mut self.proof_tracer.borrow_mut().learned_to_trace);
+        for clause in learned {
+            self.trace_clause("learned", &clause);
+        }
+    }
+
     fn queue_external_clause(&self, clause: Vec<i32>) {
+        self.trace_clause("external-clause", &clause);
+        self.push_external_clause(clause);
+    }
+
+    fn push_external_clause(&self, clause: Vec<i32>) {
         self.proof_tracer
             .borrow_mut()
             .register_clause_for_cadical_callback(&clause);
@@ -327,10 +361,11 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
+        self.trace_clause(&format!("theory-clause {theory:?}"), &clause);
         self.proof_tracer
             .borrow_mut()
             .add_theory_clause(&clause, theory);
-        self.queue_external_clause(clause);
+        self.push_external_clause(clause);
     }
 
     pub fn sync_external_stats(&mut self) {
@@ -715,6 +750,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn notify_backtrack(&mut self, level: usize) {
+        // Before the assignments are reset, so the trace shows the literals' levels
+        self.trace_learned();
         self.stats.backtracks += 1;
         debug_println!(
             23,
@@ -1080,6 +1117,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .get(&propagated_lit)
                 .unwrap_or_else(|| panic!("no reason recorded for propagated literal {propagated_lit}"))
                 .clone();
+            self.trace_clause(&format!("reason {theory:?}"), &reason);
             // CaDiCaL learns the reason as an external clause
             self.proof_tracer
                 .borrow_mut()
