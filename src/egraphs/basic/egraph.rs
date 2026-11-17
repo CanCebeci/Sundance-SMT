@@ -5,7 +5,7 @@ use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::debug_println;
-use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
+use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit, Propagation};
 use crate::log::is_important;
 use crate::utils::{
     DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
@@ -249,6 +249,26 @@ pub struct Egraph {
     /// Generation given to nodes registered from now on; the quantifier
     /// module sets it while it materializes an instance and resets it to 0.
     pub(crate) current_generation: u32,
+
+    // --- Propagation of literals implied by the egraph ---
+    /// Class members as circular lists: `next[t]` is the next member of t's
+    /// class. A union swaps the `next` of the two roots, and undoing it swaps
+    /// them back. Terms are never unregistered, so this is exact.
+    next: Vec<u32>,
+    /// Number of members of each class (valid at roots).
+    class_size: Vec<u32>,
+    /// Unions to undo on backtracking: (level, surviving root, merged root).
+    /// Pushed and popped with `proof_forest_backtrack_stack`.
+    member_trail: Vec<(usize, u32, u32)>,
+    /// Watched Boolean terms: term -> its SAT literal.
+    bool_watches: FastDeterministicHashMap<u32, Lit>,
+    /// Watched equalities, under both sides: term -> [(other side, literal)].
+    eq_watches: FastDeterministicHashMap<u32, Vec<(u32, Lit)>>,
+    /// The `true` and `false` constants (always the roots of their classes).
+    bool_constants: Option<(u32, u32)>,
+    /// Implied literals not yet taken by the solver, with the level they were
+    /// found at.
+    propagation_queue: std::collections::VecDeque<(usize, Propagation<u32>)>,
 }
 
 /// Statistics accumulated by the egraph.
@@ -292,6 +312,13 @@ impl Egraph {
             stats: EgraphStats::default(),
             generations: DeterministicHashMap::default(),
             current_generation: 0,
+            next: vec![0],
+            class_size: vec![1],
+            member_trail: Vec::new(),
+            bool_watches: FastDeterministicHashMap::default(),
+            eq_watches: FastDeterministicHashMap::default(),
+            bool_constants: None,
+            propagation_queue: std::collections::VecDeque::new(),
         }
     }
 
@@ -446,6 +473,12 @@ impl Egraph {
                 self.predecessors.len() * 2,
                 FastDeterministicHashMap::default(),
             );
+        }
+        // every slot starts as a singleton class
+        while self.next.len() < self.terms.len() {
+            let i = self.next.len() as u32;
+            self.next.push(i);
+            self.class_size.push(1);
         }
     }
 
@@ -930,6 +963,16 @@ impl Egraph {
                 self.proof_forest_backtrack_stack.pop().unwrap();
             self.proof_forest_backtrack(backtrack_equality, y, y_root);
         }
+        while let Some(&(trail_level, x_root, y_root)) = self.member_trail.last() {
+            if trail_level <= level {
+                break;
+            }
+            self.member_trail.pop();
+            self.next.swap(x_root as usize, y_root as usize);
+            self.class_size[x_root as usize] -= self.class_size[y_root as usize];
+        }
+        // Propagations found above `level` may no longer hold
+        self.propagation_queue.retain(|(found_at, _)| *found_at <= level);
 
         // Replay sig_trail in reverse AFTER UF is restored.
         // Use the stored key directly — recomputing from find() would give the wrong key.
@@ -998,6 +1041,7 @@ impl Egraph {
             self.union_to_eclass = DeterministicHashMap::new();
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
+            self.member_trail.clear();
         }
     }
 
@@ -1112,6 +1156,61 @@ impl Egraph {
     /// but this could double/triple the max tree size at each iteration
     ///
     /// design decision: don't have eager updates for equivalence class and inverting tree
+    /// Merge the member lists of two classes (x_root survives).
+    fn union_members(&mut self, x_root: u32, y_root: u32, level: usize) {
+        self.next.swap(x_root as usize, y_root as usize);
+        self.class_size[x_root as usize] += self.class_size[y_root as usize];
+        if level > 0 {
+            self.member_trail.push((level, x_root, y_root));
+        }
+    }
+
+    /// Queue the watched literals implied by merging the classes of `x_root`
+    /// and `y_root` (x_root survives; it is the `true` or `false` constant if
+    /// either root is, since constants stay roots). Called before the union.
+    fn find_propagations(&mut self, x_root: u32, y_root: u32, level: usize) {
+        if self.bool_watches.is_empty() && self.eq_watches.is_empty() {
+            return;
+        }
+        // Joining the class of true/false decides y's Boolean terms; otherwise
+        // only equalities can become true, which the smaller class can find.
+        let constant = match self.bool_constants {
+            Some((t, _)) if t == x_root => Some((true, t)),
+            Some((_, f)) if f == x_root => Some((false, f)),
+            _ => None,
+        };
+        let (walk, other_root) = if constant.is_some()
+            || self.class_size[y_root as usize] <= self.class_size[x_root as usize]
+        {
+            (y_root, x_root)
+        } else {
+            (x_root, y_root)
+        };
+        let mut found = Vec::new();
+        let mut m = walk;
+        loop {
+            if let Some((value, c)) = constant
+                && let Some(&lit) = self.bool_watches.get(&m)
+            {
+                let lit = if value { lit } else { -lit };
+                found.push(Propagation { lit, lhs: m, rhs: c });
+            }
+            if let Some(watches) = self.eq_watches.get(&m) {
+                for &(other, lit) in watches {
+                    if self.find(other) == other_root {
+                        found.push(Propagation { lit, lhs: m, rhs: other });
+                    }
+                }
+            }
+            m = self.next[m as usize];
+            if m == walk {
+                break;
+            }
+        }
+        self.propagation_queue
+            .extend(found.into_iter().map(|p| (level, p)));
+    }
+
     fn cc_union(
         &mut self,
         x: u32,
@@ -1264,6 +1363,8 @@ impl Egraph {
             self.display_term(y),
             self.display_term(y_root)
         );
+        self.find_propagations(x_root, y_root, level);
+        self.union_members(x_root, y_root, level);
         self.make_root(y, proof_parent);
 
         // Early conflict check: x_root's existing disequalities may already be
@@ -1757,8 +1858,41 @@ impl EgraphTrait for Egraph {
         id
     }
 
-    fn register_eq(&mut self, _t1: Self::TermId, _t2: Self::TermId, _lit: Lit) {
-        // TODO: watch-based equality propagation (future optimization)
+    fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit) {
+        self.eq_watches.entry(t1).or_default().push((t2, lit));
+        self.eq_watches.entry(t2).or_default().push((t1, lit));
+        if self.find(t1) == self.find(t2) {
+            self.propagation_queue.push_back((
+                self.decision_level,
+                Propagation { lit, lhs: t1, rhs: t2 },
+            ));
+        }
+    }
+
+    fn set_boolean_constants(&mut self, true_term: Self::TermId, false_term: Self::TermId) {
+        debug_assert!(self.is_constant(true_term) && self.is_constant(false_term));
+        self.bool_constants = Some((true_term, false_term));
+    }
+
+    fn watch_boolean(&mut self, term: Self::TermId, lit: Lit) {
+        self.bool_watches.insert(term, lit);
+        if let Some((t, f)) = self.bool_constants {
+            let root = self.find(term);
+            let implied = if root == t {
+                Some(Propagation { lit, lhs: term, rhs: t })
+            } else if root == f {
+                Some(Propagation { lit: -lit, lhs: term, rhs: f })
+            } else {
+                None
+            };
+            if let Some(p) = implied {
+                self.propagation_queue.push_back((self.decision_level, p));
+            }
+        }
+    }
+
+    fn next_propagation(&mut self) -> Option<Propagation<Self::TermId>> {
+        self.propagation_queue.pop_front().map(|(_, p)| p)
     }
 
     fn register_boolean_term(

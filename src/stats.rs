@@ -71,6 +71,8 @@ pub struct SolverStats {
     pub bool_vars: u64,
     /// Number of equality merges in the egraph (where roots differed)
     pub egraph_merges: u64,
+    /// Number of literals propagated because the egraph implies them
+    pub theory_propagations: u64,
     /// Number of datatype accessor axioms (selector projections)
     pub dt_accessor_ax: u64,
     /// Number of datatype constructor axioms (tester/exhaustiveness)
@@ -114,6 +116,7 @@ impl SolverStats {
             deleted_clauses: 0,
             bool_vars: 0,
             egraph_merges: 0,
+            theory_propagations: 0,
             dt_accessor_ax: 0,
             dt_constructor_ax: 0,
             dt_splits: 0,
@@ -218,6 +221,11 @@ impl fmt::Display for SolverStats {
             self.instantiation_rounds
         )?;
         writeln!(f, "  \"egraph_merges\": {},", self.egraph_merges)?;
+        writeln!(
+            f,
+            "  \"theory_propagations\": {},",
+            self.theory_propagations
+        )?;
         writeln!(f, "  \"bool_vars\": {},", self.bool_vars)?;
         writeln!(f, "  \"clauses\": {},", self.clauses)?;
         writeln!(f, "  \"binary_clauses\": {},", self.binary_clauses)?;

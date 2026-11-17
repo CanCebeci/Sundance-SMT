@@ -7,7 +7,7 @@ use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
-use crate::egraphs::traits::Conflict;
+use crate::egraphs::traits::{Conflict, Propagation};
 use crate::log::{is_important, planner_trace};
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
@@ -62,6 +62,11 @@ pub struct CustomExternalPropagator<'a> {
     // a quantifier instance is tagged with that instance's number.
     pub awaiting_decision: bool,
     pub var_origin: DeterministicHashMap<i32, u64>,
+    /// Reason clause of each literal propagated by `cb_propagate`, kept until
+    /// the literal is propagated again (CaDiCaL asks for reasons lazily).
+    pub reasons: DeterministicHashMap<i32, Vec<i32>>,
+    /// The rest of the reason clause being handed to CaDiCaL, last literal first.
+    pub reason_in_progress: Option<Vec<i32>>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -156,8 +161,72 @@ impl<'a> CustomExternalPropagator<'a> {
                 }
                 self.add_observed_variable(var);
                 self.add_lit_to_proof_tracer(var);
+                self.watch_literal(var, uid);
             }
         }
+    }
+
+    /// Have the egraph report when `var`'s term (with solver uid `uid`) is
+    /// implied: a Boolean term equal to true/false, or an equality whose
+    /// sides are equal.
+    fn watch_literal(&mut self, var: i32, uid: u64) {
+        use yaspar_ir::ast::Repr as _;
+        let state = &mut *self.solver_state;
+        let Some(id) = state.id_map.get_by_left(&uid).copied() else {
+            return;
+        };
+        state.egraph.watch_boolean(id, var);
+        if let yaspar_ir::ast::ATerm::Eq(l, r) = state.get_term(uid).repr()
+            && let Some(a) = state.id_map.get_by_left(&l.uid()).copied()
+            && let Some(b) = state.id_map.get_by_left(&r.uid()).copied()
+        {
+            state.egraph.register_eq(a, b, var);
+        }
+    }
+
+    /// 1 if `lit` is assigned true, -1 if false, 0 if unassigned.
+    fn lit_value(&self, lit: i32) -> i32 {
+        let v = self
+            .assignments
+            .get(lit.unsigned_abs() as usize)
+            .copied()
+            .unwrap_or(0);
+        if v == 0 {
+            0
+        } else if (v > 0) == (lit > 0) {
+            1
+        } else {
+            -1
+        }
+    }
+
+    /// The reason clause for a propagation from the egraph: `lit` or the
+    /// negation of an equality explaining `lhs = rhs`. None if some step of the
+    /// explanation is not an assigned literal (then `lit` is not propagated).
+    fn propagation_reason(&mut self, p: &Propagation<u32>) -> Option<Vec<i32>> {
+        let state = &mut *self.solver_state;
+        if state.egraph.find(p.lhs) != state.egraph.find(p.rhs) {
+            return None; // no longer implied
+        }
+        let explanation = if p.lhs == p.rhs {
+            Vec::new()
+        } else {
+            state.egraph.explain_equality(p.lhs, p.rhs)?
+        };
+        let mut lits = Vec::with_capacity(explanation.len());
+        for (a, b) in explanation {
+            lits.push(state.existing_eq_lit(a, b)?);
+        }
+        let mut reason = vec![p.lit];
+        for l in lits {
+            if l.unsigned_abs() == p.lit.unsigned_abs() || self.lit_value(l) != 1 {
+                return None;
+            }
+            if !reason.contains(&-l) {
+                reason.push(-l);
+            }
+        }
+        Some(reason)
     }
 
     pub fn add_lit_to_proof_tracer(&mut self, lit: i32) {
@@ -956,23 +1025,58 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         0
     }
 
+    /// Propagate a literal the egraph has found to be implied: a Boolean term
+    /// in the class of true/false, or an equality whose sides are equal.
     fn cb_propagate(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
-        // For now, no propagation
-        // This could deduce new assignments
+        // Let CaDiCaL take pending clauses (e.g. a conflict) first
+        if !self.queued_clauses.borrow().is_empty() {
+            return 0;
+        }
+        while let Some(p) = self.solver_state.egraph.next_propagation() {
+            if self.lit_value(p.lit) != 0 {
+                continue; // already assigned (if false, the egraph reports the conflict)
+            }
+            if let Some(reason) = self.propagation_reason(&p) {
+                debug_println!(7, 0, "PROPAGATOR: Propagating {} with reason {:?}", p.lit, reason);
+                self.stats.theory_propagations += 1;
+                self.reasons.insert(p.lit, reason);
+                return p.lit;
+            }
+        }
         0
     }
 
-    fn cb_add_reason_clause_lit(&mut self, _propagated_lit: i32) -> i32 {
+    fn cb_add_reason_clause_lit(&mut self, propagated_lit: i32) -> i32 {
         debug_println!(
             7,
             0,
             "PROPAGATOR: Adding reason clause for literal {}",
-            _propagated_lit
+            propagated_lit
         );
-        // For now, no reason clauses
-        // This could explain propagations
-        0
+        if self.reason_in_progress.is_none() {
+            let reason = self
+                .reasons
+                .get(&propagated_lit)
+                .unwrap_or_else(|| panic!("no reason recorded for propagated literal {propagated_lit}"))
+                .clone();
+            // CaDiCaL learns the reason as an external clause
+            self.proof_tracer
+                .borrow_mut()
+                .add_theory_clause(&reason, Theory::QfUf);
+            self.proof_tracer
+                .borrow_mut()
+                .register_clause_for_cadical_callback(&reason);
+            self.reason_in_progress = Some(reason.into_iter().rev().collect());
+        }
+        let rest = self.reason_in_progress.as_mut().unwrap();
+        match rest.pop() {
+            Some(lit) => lit,
+            None => {
+                self.reason_in_progress = None;
+                0
+            }
+        }
     }
 
     fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {

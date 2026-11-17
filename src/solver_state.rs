@@ -315,6 +315,35 @@ impl SolverState {
         }
     }
 
+    /// Like `make_eq`, but only finds an existing literal: never allocates one.
+    pub fn existing_eq_lit(&mut self, x: u32, y: u32) -> Option<i32> {
+        let true_id = self.to_egraph_id(self.true_uid);
+        let false_id = self.to_egraph_id(self.false_uid);
+        let lit_of = |s: &Self, id: u32| s.get_lit_from_u64_safe(s.to_solver_uid(id));
+        if (x == false_id && y == true_id) || (x == true_id && y == false_id) {
+            lit_of(self, false_id)
+        } else if (x == true_id && y == true_id) || (x == false_id && y == false_id) {
+            lit_of(self, true_id)
+        } else if x == true_id {
+            lit_of(self, y)
+        } else if y == true_id {
+            lit_of(self, x)
+        } else if x == false_id {
+            lit_of(self, y).map(|l| -l)
+        } else if y == false_id {
+            lit_of(self, x).map(|l| -l)
+        } else {
+            let tx = self.get_term(self.to_solver_uid(x));
+            let ty = self.get_term(self.to_solver_uid(y));
+            let eq_xy = self.context.eq(tx.clone(), ty.clone());
+            if let Some(lit) = self.cnf_cache.var_map.get(&eq_xy.uid()).copied() {
+                return Some(lit);
+            }
+            let eq_yx = self.context.eq(ty, tx);
+            self.cnf_cache.var_map.get(&eq_yx.uid()).copied()
+        }
+    }
+
     pub fn get_term(&self, num: u64) -> Term {
         self.terms_list[num as usize].clone().unwrap()
     }
@@ -379,6 +408,8 @@ impl SolverState {
         self.terms_list[false_uid as usize] = TermOption::Some(false_term.clone());
         self.id_map.insert(true_uid, true_egraph_id);
         self.id_map.insert(false_uid, false_egraph_id);
+        self.egraph
+            .set_boolean_constants(true_egraph_id, false_egraph_id);
     }
 
     /// Extract Op from a yaspar Term.

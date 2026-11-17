@@ -123,6 +123,8 @@ pub fn cdcl_decision_procedure(
         trail_atoms: std::collections::HashMap::new(),
         awaiting_decision: false,
         var_origin: crate::utils::DeterministicHashMap::default(),
+        reasons: crate::utils::DeterministicHashMap::default(),
+        reason_in_progress: None,
     };
 
     solver.connect_external_propagator(&mut propagator);

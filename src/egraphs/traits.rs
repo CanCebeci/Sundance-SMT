@@ -28,6 +28,16 @@ pub struct Conflict<T> {
     pub diseq_lit: Option<Lit>,
 }
 
+/// A literal the egraph has found to be implied: `lit` holds because `lhs`
+/// and `rhs` are in the same class. The equality is explained by
+/// `explain_equality(lhs, rhs)`.
+#[derive(Debug, Clone, Copy)]
+pub struct Propagation<T> {
+    pub lit: Lit,
+    pub lhs: T,
+    pub rhs: T,
+}
+
 /// Result of a mutating egraph operation (assert_equal, assert_disequal, etc.).
 #[derive(Debug, Clone)]
 pub struct EgraphResult<T> {
@@ -85,9 +95,22 @@ pub trait EgraphTrait {
     fn compile_pattern(&mut self, pattern: Pattern<Self::TermId>) -> PatternId;
 
     /// Register an equality `t1 = t2` with its corresponding SAT literal.
-    /// Sets up a watch: when `t1` and `t2` become equal, `lit` is propagated.
-    /// When they become provably disequal, `-lit` is propagated.
+    /// Sets up a watch: when `t1` and `t2` are (or become) equal, `lit` is
+    /// queued as a propagation (see `next_propagation`).
+    /// Disequalities are not propagated (`-lit` is never queued).
     fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit);
+
+    /// Identify the `true` and `false` constants, for `watch_boolean`.
+    fn set_boolean_constants(&mut self, true_term: Self::TermId, false_term: Self::TermId);
+
+    /// Watch a Boolean term with its SAT literal: when `term` is (or becomes)
+    /// equal to `true`, `lit` is queued as a propagation; when it is equal to
+    /// `false`, `-lit` is.
+    fn watch_boolean(&mut self, term: Self::TermId, lit: Lit);
+
+    /// Pop the oldest queued propagation. Propagations found at decision levels
+    /// that are later backtracked are dropped from the queue.
+    fn next_propagation(&mut self) -> Option<Propagation<Self::TermId>>;
 
     /// Register a boolean non-equality term with its SAT literal.
     /// When the term becomes equal to `true_term`, `lit` is propagated.

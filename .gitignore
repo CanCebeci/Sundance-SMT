@@ -10,3 +10,7 @@ target/
 *.edrat
 *.drat
 *.lrat
+
+expers
+outputs
+query
