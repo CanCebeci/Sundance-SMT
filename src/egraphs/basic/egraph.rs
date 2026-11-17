@@ -1958,6 +1958,19 @@ impl EgraphTrait for Egraph {
         self.assert_distinct(terms, lit)
     }
 
+    fn lookup_congruent(&self, op: &Op, children: &[u32]) -> Option<u32> {
+        let op = match op {
+            Op::App(s) => CanonicalOp::App(s.to_string()),
+            Op::Eq => CanonicalOp::Eq,
+            Op::Ite => CanonicalOp::Ite,
+            _ => return None,
+        };
+        let canonical: Vec<u32> = children.iter().map(|&c| self.find(c)).collect();
+        self.sig_table
+            .get(&(op, Children::from_slice(&canonical)))
+            .copied()
+    }
+
     fn find(&self, term: Self::TermId) -> Self::TermId {
         self.find(term)
     }

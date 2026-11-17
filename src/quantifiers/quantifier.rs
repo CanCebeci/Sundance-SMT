@@ -19,7 +19,9 @@ use crate::solver_types::Polarity;
 use crate::utils::{DeterministicHashMap, FastDeterministicHashSet};
 
 use crate::debug_println;
-use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
+use yaspar_ir::ast::{
+    AConstant, ATerm, LetElim, Repr as _, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
@@ -66,6 +68,152 @@ impl PendingInstantiations {
 
     pub(crate) fn skolemized_quantifier_idxs(&self) -> &[usize] {
         &self.skolemized_quantifier_idxs
+    }
+}
+
+/// Decides whether an instance of a quantifier body is already true (or already
+/// false) in the current e-graph, without creating any term, following Z3's
+/// `smt::checker`. Bound variables stand for their bindings' e-classes; other
+/// terms are looked up as registered terms or, failing that, through congruence
+/// (a term with the same operator over equal children). An atom has a value when
+/// its class contains `true` or `false`, which assigned atoms are merged with.
+/// With relevancy, only the values of relevant atoms count, and a registered
+/// formula that is relevant decides by its own value, even when it has none
+/// yet. Unlike Z3, the terms used only to find a class need not be relevant:
+/// e.g. constructor terms from datatype axioms are never relevant here, but
+/// the equalities they take part in hold all the same.
+struct SatChecker<'a> {
+    solver_state: &'a SolverState,
+    subs: &'a DeterministicHashMap<Local, u32>,
+    relevant: Option<&'a FastDeterministicHashSet<u32>>,
+    true_root: u32,
+    false_root: u32,
+}
+
+impl<'a> SatChecker<'a> {
+    fn new(
+        solver_state: &'a SolverState,
+        subs: &'a DeterministicHashMap<Local, u32>,
+        relevant: Option<&'a FastDeterministicHashSet<u32>>,
+    ) -> Self {
+        let egraph = &solver_state.egraph;
+        let true_root = egraph.find(solver_state.to_egraph_id(solver_state.true_uid));
+        let false_root = egraph.find(solver_state.to_egraph_id(solver_state.false_uid));
+        SatChecker {
+            solver_state,
+            subs,
+            relevant,
+            true_root,
+            false_root,
+        }
+    }
+
+    fn is_relevant(&self, id: u32) -> bool {
+        self.relevant.is_none_or(|r| r.contains(&id))
+    }
+
+    /// The truth value of the class of `id`, if it contains `true` or `false`
+    fn class_value(&self, id: u32) -> Option<bool> {
+        let root = self.solver_state.egraph.find(id);
+        if root == self.true_root {
+            Some(true)
+        } else if root == self.false_root {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// An e-graph term equal to `term` under the bindings
+    fn eq_to(&self, term: &Term) -> Option<u32> {
+        match term.repr() {
+            ATerm::Local(local) => return self.subs.get(&local).copied(),
+            ATerm::Annotated(inner, _) => return self.eq_to(inner),
+            _ => {}
+        }
+        if let Some(id) = self.solver_state.registered_egraph_id(term.uid()) {
+            return Some(id);
+        }
+        let children: Vec<&Term> = match term.repr() {
+            ATerm::App(_, args, _) => args.iter().collect(),
+            ATerm::Eq(a, b) => vec![a, b],
+            ATerm::Ite(c, a, b) => vec![c, a, b],
+            _ => return None,
+        };
+        if children.is_empty() {
+            return None;
+        }
+        let ids = children
+            .iter()
+            .map(|c| self.eq_to(c))
+            .collect::<Option<Vec<u32>>>()?;
+        let op = SolverState::extract_op(term);
+        let egraph = &self.solver_state.egraph;
+        egraph.lookup_congruent(&op, &ids).or_else(|| {
+            matches!(term.repr(), ATerm::Eq(..))
+                .then(|| egraph.lookup_congruent(&op, &[ids[1], ids[0]]))
+                .flatten()
+        })
+    }
+
+    /// The value of the atom `term` under the bindings: that of a relevant
+    /// e-graph term equal to it
+    fn atom_value(&self, term: &Term) -> Option<bool> {
+        let id = self.eq_to(term)?;
+        if self.is_relevant(id) {
+            self.class_value(id)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `term` (a formula) is known to have the value `is_true`
+    fn check(&self, term: &Term, is_true: bool) -> bool {
+        if let Some(id) = self.solver_state.registered_egraph_id(term.uid())
+            && self.is_relevant(id)
+        {
+            return self.class_value(id) == Some(is_true);
+        }
+        match term.repr() {
+            ATerm::Constant(AConstant::Bool(b), _) => *b == is_true,
+            ATerm::Annotated(inner, _) => self.check(inner, is_true),
+            ATerm::Not(a) => self.check(a, !is_true),
+            ATerm::And(args) if is_true => args.iter().all(|a| self.check(a, true)),
+            ATerm::And(args) => args.iter().any(|a| self.check(a, false)),
+            ATerm::Or(args) if is_true => args.iter().any(|a| self.check(a, true)),
+            ATerm::Or(args) => args.iter().all(|a| self.check(a, false)),
+            ATerm::Implies(lhs, rhs) if is_true => {
+                lhs.iter().any(|a| self.check(a, false)) || self.check(rhs, true)
+            }
+            ATerm::Implies(lhs, rhs) => {
+                lhs.iter().all(|a| self.check(a, true)) && self.check(rhs, false)
+            }
+            ATerm::Ite(c, a, b) => {
+                if self.check(c, true) {
+                    self.check(a, is_true)
+                } else if self.check(c, false) {
+                    self.check(b, is_true)
+                } else {
+                    self.check(a, is_true) && self.check(b, is_true)
+                }
+            }
+            ATerm::Eq(a, b) => {
+                if is_true
+                    && let (Some(x), Some(y)) = (self.eq_to(a), self.eq_to(b))
+                    && self.solver_state.egraph.are_equal(x, y)
+                {
+                    return true;
+                }
+                // A congruent equality atom with a value (e.g. a disequality)
+                if self.atom_value(term) == Some(is_true) {
+                    return true;
+                }
+                // Boolean sides: equal or opposite values
+                (self.check(a, true) && self.check(b, is_true))
+                    || (self.check(a, false) && self.check(b, !is_true))
+            }
+            _ => self.atom_value(term) == Some(is_true),
+        }
     }
 }
 
@@ -196,6 +344,25 @@ pub(crate) fn instantiate_quantifiers(
                 if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
                     && set.contains(&subs)
                 {
+                    continue;
+                }
+
+                // Like Z3, skip instances whose body is already true. They are not
+                // recorded as added, so a later round can still add them once the
+                // body no longer holds (e.g. after backtracking).
+                let checker = SatChecker::new(solver_state, subs_ids, relevant);
+                if checker.check(&solver_state.get_term(body), !quantifier_is_exists) {
+                    if trace_relevancy() {
+                        let mut sorted: Vec<_> = subs.iter().collect();
+                        sorted.sort_by(|a, b| a.0.cmp(b.0));
+                        let bindings: Vec<String> =
+                            sorted.iter().map(|(_, t)| t.to_string()).collect();
+                        eprintln!(
+                            "[satisfied] {} {}",
+                            solver_state.get_term(quantifier.id),
+                            bindings.join(" ")
+                        );
+                    }
                     continue;
                 }
                 solver_state

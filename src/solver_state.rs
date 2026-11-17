@@ -376,6 +376,15 @@ impl SolverState {
         self.id_map.get_by_left(&solver_uid).copied()
     }
 
+    /// The egraph term ID of a solver term UID, if the term is registered in the
+    /// egraph as a term (not just allocated for a trigger pattern).
+    pub fn registered_egraph_id(&self, solver_uid: u64) -> Option<u32> {
+        match self.terms_list.get(solver_uid as usize) {
+            Some(TermOption::Some(_)) => self.egraph_id(solver_uid),
+            _ => None,
+        }
+    }
+
     /// Convert an egraph term ID to the corresponding solver UID.
     pub fn to_solver_uid(&self, egraph_id: u32) -> u64 {
         *self
@@ -413,7 +422,7 @@ impl SolverState {
     }
 
     /// Extract Op from a yaspar Term.
-    fn extract_op(term: &Term) -> crate::egraphs::repr::Op {
+    pub(crate) fn extract_op(term: &Term) -> crate::egraphs::repr::Op {
         use crate::egraphs::repr::Op;
         match term.repr() {
             Eq(_, _) => Op::Eq,
