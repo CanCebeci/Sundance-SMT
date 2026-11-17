@@ -28,14 +28,47 @@ pub struct Conflict<T> {
     pub diseq_lit: Option<Lit>,
 }
 
-/// A literal the egraph has found to be implied: `lit` holds because `lhs`
-/// and `rhs` are in the same class. The equality is explained by
-/// `explain_equality(lhs, rhs)`.
-#[derive(Debug, Clone, Copy)]
+/// A literal the egraph has found to be implied: `lit` holds because the two
+/// sides of each pair in `equalities` are in the same class (each explained by
+/// `explain_equality`). With `arithmetic`, the implication also relies on the
+/// values of numerals (e.g. `a = 1, b = 2` implies `a < b`), so it is an
+/// arithmetic fact rather than a consequence of congruence alone.
+#[derive(Debug, Clone)]
 pub struct Propagation<T> {
     pub lit: Lit,
-    pub lhs: T,
-    pub rhs: T,
+    pub equalities: Vec<(T, T)>,
+    pub arithmetic: bool,
+}
+
+/// An integer comparison operator, chainable as in SMT-LIB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    Le,
+    Lt,
+    Ge,
+    Gt,
+}
+
+impl Comparison {
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        match symbol {
+            "<=" => Some(Comparison::Le),
+            "<" => Some(Comparison::Lt),
+            ">=" => Some(Comparison::Ge),
+            ">" => Some(Comparison::Gt),
+            _ => None,
+        }
+    }
+
+    /// Whether `values[0] op values[1] op ...` holds
+    pub fn holds(self, values: &[&dashu::integer::IBig]) -> bool {
+        values.windows(2).all(|w| match self {
+            Comparison::Le => w[0] <= w[1],
+            Comparison::Lt => w[0] < w[1],
+            Comparison::Ge => w[0] >= w[1],
+            Comparison::Gt => w[0] > w[1],
+        })
+    }
 }
 
 /// Result of a mutating egraph operation (assert_equal, assert_disequal, etc.).
@@ -107,6 +140,17 @@ pub trait EgraphTrait {
     /// equal to `true`, `lit` is queued as a propagation; when it is equal to
     /// `false`, `-lit` is.
     fn watch_boolean(&mut self, term: Self::TermId, lit: Lit);
+
+    /// Record that the constant `term` is the integer numeral `value`. A class
+    /// whose root is such a constant has that value (constants stay roots).
+    fn set_numeral(&mut self, term: Self::TermId, value: dashu::integer::IBig);
+
+    /// Watch the integer comparison `args[0] op args[1] op ...` with its SAT
+    /// literal: when (or once) every argument is equal to a numeral, `lit` or
+    /// `-lit` is queued as an arithmetic propagation, according to the values.
+    /// Equalities registered with `register_eq` are likewise propagated false
+    /// when their sides are equal to different numerals.
+    fn watch_comparison(&mut self, op: Comparison, args: Vec<Self::TermId>, lit: Lit);
 
     /// Pop the oldest queued propagation. Propagations found at decision levels
     /// that are later backtracked are dropped from the queue.

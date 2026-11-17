@@ -7,7 +7,7 @@ use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
-use crate::egraphs::traits::{Conflict, Propagation};
+use crate::egraphs::traits::{Comparison, Conflict, Propagation};
 use crate::log::{is_important, planner_trace};
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
@@ -64,7 +64,7 @@ pub struct CustomExternalPropagator<'a> {
     pub var_origin: DeterministicHashMap<i32, u64>,
     /// Reason clause of each literal propagated by `cb_propagate`, kept until
     /// the literal is propagated again (CaDiCaL asks for reasons lazily).
-    pub reasons: DeterministicHashMap<i32, Vec<i32>>,
+    pub reasons: DeterministicHashMap<i32, (Vec<i32>, Theory)>,
     /// The rest of the reason clause being handed to CaDiCaL, last literal first.
     pub reason_in_progress: Option<Vec<i32>>,
 }
@@ -176,11 +176,26 @@ impl<'a> CustomExternalPropagator<'a> {
             return;
         };
         state.egraph.watch_boolean(id, var);
-        if let yaspar_ir::ast::ATerm::Eq(l, r) = state.get_term(uid).repr()
-            && let Some(a) = state.id_map.get_by_left(&l.uid()).copied()
-            && let Some(b) = state.id_map.get_by_left(&r.uid()).copied()
-        {
-            state.egraph.register_eq(a, b, var);
+        match state.get_term(uid).repr() {
+            yaspar_ir::ast::ATerm::Eq(l, r) => {
+                if let Some(a) = state.id_map.get_by_left(&l.uid()).copied()
+                    && let Some(b) = state.id_map.get_by_left(&r.uid()).copied()
+                {
+                    state.egraph.register_eq(a, b, var);
+                }
+            }
+            yaspar_ir::ast::ATerm::App(f, args, _) => {
+                if let Some(op) = Comparison::from_symbol(f.id_str().get())
+                    && args.len() >= 2
+                    && let Some(ids) = args
+                        .iter()
+                        .map(|a| state.id_map.get_by_left(&a.uid()).copied())
+                        .collect::<Option<Vec<u32>>>()
+                {
+                    state.egraph.watch_comparison(op, ids, var);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -205,17 +220,17 @@ impl<'a> CustomExternalPropagator<'a> {
     /// explanation is not an assigned literal (then `lit` is not propagated).
     fn propagation_reason(&mut self, p: &Propagation<u32>) -> Option<Vec<i32>> {
         let state = &mut *self.solver_state;
-        if state.egraph.find(p.lhs) != state.egraph.find(p.rhs) {
-            return None; // no longer implied
-        }
-        let explanation = if p.lhs == p.rhs {
-            Vec::new()
-        } else {
-            state.egraph.explain_equality(p.lhs, p.rhs)?
-        };
-        let mut lits = Vec::with_capacity(explanation.len());
-        for (a, b) in explanation {
-            lits.push(state.existing_eq_lit(a, b)?);
+        let mut lits = Vec::new();
+        for &(lhs, rhs) in &p.equalities {
+            if lhs == rhs {
+                continue;
+            }
+            if state.egraph.find(lhs) != state.egraph.find(rhs) {
+                return None; // no longer implied
+            }
+            for (a, b) in state.egraph.explain_equality(lhs, rhs)? {
+                lits.push(state.existing_eq_lit(a, b)?);
+            }
         }
         let mut reason = vec![p.lit];
         for l in lits {
@@ -1040,7 +1055,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             if let Some(reason) = self.propagation_reason(&p) {
                 debug_println!(7, 0, "PROPAGATOR: Propagating {} with reason {:?}", p.lit, reason);
                 self.stats.theory_propagations += 1;
-                self.reasons.insert(p.lit, reason);
+                let theory = if p.arithmetic {
+                    Theory::QfLia
+                } else {
+                    Theory::QfUf
+                };
+                self.reasons.insert(p.lit, (reason, theory));
                 return p.lit;
             }
         }
@@ -1055,7 +1075,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             propagated_lit
         );
         if self.reason_in_progress.is_none() {
-            let reason = self
+            let (reason, theory) = self
                 .reasons
                 .get(&propagated_lit)
                 .unwrap_or_else(|| panic!("no reason recorded for propagated literal {propagated_lit}"))
@@ -1063,7 +1083,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             // CaDiCaL learns the reason as an external clause
             self.proof_tracer
                 .borrow_mut()
-                .add_theory_clause(&reason, Theory::QfUf);
+                .add_theory_clause(&reason, theory);
             self.proof_tracer
                 .borrow_mut()
                 .register_clause_for_cadical_callback(&reason);

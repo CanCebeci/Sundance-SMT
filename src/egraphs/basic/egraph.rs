@@ -5,7 +5,7 @@ use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::debug_println;
-use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit, Propagation};
+use crate::egraphs::traits::{Comparison, Conflict, EgraphResult, EgraphTrait, Lit, Propagation};
 use crate::log::is_important;
 use crate::utils::{
     DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
@@ -269,6 +269,12 @@ pub struct Egraph {
     /// Implied literals not yet taken by the solver, with the level they were
     /// found at.
     propagation_queue: std::collections::VecDeque<(usize, Propagation<u32>)>,
+    /// Values of the integer numeral constants.
+    numerals: FastDeterministicHashMap<u32, dashu::integer::IBig>,
+    /// Watched comparisons: (operator, arguments, literal).
+    comparisons: Vec<(Comparison, Vec<u32>, Lit)>,
+    /// Term -> indices in `comparisons` of the comparisons it is an argument of.
+    comparison_watches: FastDeterministicHashMap<u32, Vec<usize>>,
 }
 
 /// Statistics accumulated by the egraph.
@@ -319,6 +325,9 @@ impl Egraph {
             eq_watches: FastDeterministicHashMap::default(),
             bool_constants: None,
             propagation_queue: std::collections::VecDeque::new(),
+            numerals: FastDeterministicHashMap::default(),
+            comparisons: Vec::new(),
+            comparison_watches: FastDeterministicHashMap::default(),
         }
     }
 
@@ -1166,10 +1175,13 @@ impl Egraph {
     }
 
     /// Queue the watched literals implied by merging the classes of `x_root`
-    /// and `y_root` (x_root survives; it is the `true` or `false` constant if
-    /// either root is, since constants stay roots). Called before the union.
+    /// and `y_root` (x_root survives; it is the constant if either root is,
+    /// since constants stay roots). Called before the union.
     fn find_propagations(&mut self, x_root: u32, y_root: u32, level: usize) {
-        if self.bool_watches.is_empty() && self.eq_watches.is_empty() {
+        if self.bool_watches.is_empty()
+            && self.eq_watches.is_empty()
+            && self.comparison_watches.is_empty()
+        {
             return;
         }
         // Joining the class of true/false decides y's Boolean terms; otherwise
@@ -1179,7 +1191,10 @@ impl Egraph {
             Some((_, f)) if f == x_root => Some((false, f)),
             _ => None,
         };
+        // Joining the class of a numeral gives y's terms a value
+        let numeral = self.numerals.contains_key(&x_root);
         let (walk, other_root) = if constant.is_some()
+            || numeral
             || self.class_size[y_root as usize] <= self.class_size[x_root as usize]
         {
             (y_root, x_root)
@@ -1193,12 +1208,40 @@ impl Egraph {
                 && let Some(&lit) = self.bool_watches.get(&m)
             {
                 let lit = if value { lit } else { -lit };
-                found.push(Propagation { lit, lhs: m, rhs: c });
+                found.push(Propagation {
+                    lit,
+                    equalities: vec![(m, c)],
+                    arithmetic: false,
+                });
             }
             if let Some(watches) = self.eq_watches.get(&m) {
                 for &(other, lit) in watches {
-                    if self.find(other) == other_root {
-                        found.push(Propagation { lit, lhs: m, rhs: other });
+                    let root = self.find(other);
+                    if root == other_root {
+                        found.push(Propagation {
+                            lit,
+                            equalities: vec![(m, other)],
+                            arithmetic: false,
+                        });
+                    } else if numeral && root != y_root && self.numerals.contains_key(&root) {
+                        // Equal to two different numerals
+                        found.push(Propagation {
+                            lit: -lit,
+                            equalities: vec![(m, x_root), (other, root)],
+                            arithmetic: true,
+                        });
+                    }
+                }
+            }
+            if numeral && let Some(watches) = self.comparison_watches.get(&m) {
+                for &i in watches {
+                    // y's terms are about to have x's root
+                    let root_of = |t: u32| {
+                        let r = self.find(t);
+                        if r == y_root { x_root } else { r }
+                    };
+                    if let Some(p) = self.evaluate_comparison(i, root_of) {
+                        found.push(p);
                     }
                 }
             }
@@ -1209,6 +1252,34 @@ impl Egraph {
         }
         self.propagation_queue
             .extend(found.into_iter().map(|p| (level, p)));
+    }
+
+    /// The literal of comparison `i` implied by its arguments' values, if every
+    /// argument's root (as given by `root_of`) is a numeral.
+    fn evaluate_comparison(
+        &self,
+        i: usize,
+        root_of: impl Fn(u32) -> u32,
+    ) -> Option<Propagation<u32>> {
+        let (op, args, lit) = &self.comparisons[i];
+        let roots: Vec<u32> = args.iter().map(|&a| root_of(a)).collect();
+        let values = roots
+            .iter()
+            .map(|r| self.numerals.get(r))
+            .collect::<Option<Vec<_>>>()?;
+        let lit = if op.holds(&values) { *lit } else { -*lit };
+        let mut equalities: Vec<(u32, u32)> = args
+            .iter()
+            .zip(&roots)
+            .filter(|(a, r)| a != r)
+            .map(|(&a, &r)| (a, r))
+            .collect();
+        equalities.dedup();
+        Some(Propagation {
+            lit,
+            equalities,
+            arithmetic: true,
+        })
     }
 
     fn cc_union(
@@ -1861,11 +1932,24 @@ impl EgraphTrait for Egraph {
     fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit) {
         self.eq_watches.entry(t1).or_default().push((t2, lit));
         self.eq_watches.entry(t2).or_default().push((t1, lit));
-        if self.find(t1) == self.find(t2) {
-            self.propagation_queue.push_back((
-                self.decision_level,
-                Propagation { lit, lhs: t1, rhs: t2 },
-            ));
+        let (r1, r2) = (self.find(t1), self.find(t2));
+        let implied = if r1 == r2 {
+            Some(Propagation {
+                lit,
+                equalities: vec![(t1, t2)],
+                arithmetic: false,
+            })
+        } else if self.numerals.contains_key(&r1) && self.numerals.contains_key(&r2) {
+            Some(Propagation {
+                lit: -lit,
+                equalities: vec![(t1, r1), (t2, r2)],
+                arithmetic: true,
+            })
+        } else {
+            None
+        };
+        if let Some(p) = implied {
+            self.propagation_queue.push_back((self.decision_level, p));
         }
     }
 
@@ -1879,15 +1963,39 @@ impl EgraphTrait for Egraph {
         if let Some((t, f)) = self.bool_constants {
             let root = self.find(term);
             let implied = if root == t {
-                Some(Propagation { lit, lhs: term, rhs: t })
+                Some((lit, t))
             } else if root == f {
-                Some(Propagation { lit: -lit, lhs: term, rhs: f })
+                Some((-lit, f))
             } else {
                 None
             };
-            if let Some(p) = implied {
+            if let Some((lit, c)) = implied {
+                let p = Propagation {
+                    lit,
+                    equalities: vec![(term, c)],
+                    arithmetic: false,
+                };
                 self.propagation_queue.push_back((self.decision_level, p));
             }
+        }
+    }
+
+    fn set_numeral(&mut self, term: u32, value: dashu::integer::IBig) {
+        debug_assert!(self.is_constant(term));
+        self.numerals.insert(term, value);
+    }
+
+    fn watch_comparison(&mut self, op: Comparison, args: Vec<u32>, lit: Lit) {
+        let i = self.comparisons.len();
+        for &a in &args {
+            let watches = self.comparison_watches.entry(a).or_default();
+            if watches.last() != Some(&i) {
+                watches.push(i);
+            }
+        }
+        self.comparisons.push((op, args, lit));
+        if let Some(p) = self.evaluate_comparison(i, |t| self.find(t)) {
+            self.propagation_queue.push_back((self.decision_level, p));
         }
     }
 

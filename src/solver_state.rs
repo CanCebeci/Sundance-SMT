@@ -449,6 +449,16 @@ impl SolverState {
         }
     }
 
+    /// Tell the egraph the value of `term` (registered as `id`) if it is an
+    /// integer numeral.
+    fn record_numeral(&mut self, term: &Term, id: u32) {
+        use crate::egraphs::traits::EgraphTrait;
+        if let Constant(yaspar_ir::ast::alg::Constant::Numeral(n), _) = term.repr() {
+            self.egraph
+                .set_numeral(id, dashu::integer::IBig::from(n.clone()));
+        }
+    }
+
     /// Solver-level recursive term registration (bottom-up).
     /// Recurses into subterms first, then registers this term.
     /// This guarantees children exist before parents in the egraph.
@@ -498,7 +508,9 @@ impl SolverState {
         // Register this term in the egraph
         let op = Self::extract_op(term);
         let egraph_id = if matches!(op, Op::Constant(_)) {
-            self.egraph.register_constant(op)
+            let id = self.egraph.register_constant(op);
+            self.record_numeral(term, id);
+            id
         } else {
             self.egraph
                 .register_term(op, &egraph_children, from_quantifier)
@@ -544,6 +556,7 @@ impl SolverState {
                         } else {
                             self.egraph.register_term(op.clone(), &[], false)
                         };
+                        self.record_numeral(term, eid);
                         self.id_map.insert(uid, eid);
                         while self.terms_list.len() <= uid as usize {
                             self.terms_list

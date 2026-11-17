@@ -4,7 +4,10 @@
 //! Ground arithmetic simplification.
 //!
 //! Folds integer `+`, `-` and `*` whose arguments are all integer literals, e.g.
-//! `(<= (h (+ 2 1)) (f (+ (+ 2 1) 1)))` becomes `(<= (h 3) (f 4))`. Terms are
+//! `(<= (h (+ 2 1)) (f (+ (+ 2 1) 1)))` becomes `(<= (h 3) (f 4))`, and
+//! comparisons (`<=`, `<`, `>=`, `>`, `=`) of integer literals to `true` or
+//! `false`, as Z3's rewriter does: e.g. `(<= 0 1)` in a quantifier instance
+//! would otherwise be a fresh atom that only a decision can assign. Terms are
 //! hash-consed, so a folded term is the very term the input already contains and
 //! shares its e-graph node and CNF variable, letting Boolean propagation relate the
 //! two directly instead of leaving it to arithmetic conflicts.
@@ -19,8 +22,9 @@ pub trait ArithSimplify {
     ///
     /// Descends through applications, `=`, `distinct`, the Boolean connectives and `ite`, and
     /// stops at binders (`let`, quantifiers, `match`) and annotations. Only `Int`-sorted `+`, `-`
-    /// and `*` over integer literals (numerals and `(- numeral)`) fold; `div`, `mod`, `abs`, `/`
-    /// and reals are left alone. Returns the term unchanged (same uid) when nothing folds.
+    /// and `*` over integer literals (numerals and `(- numeral)`) fold, as do `<=`, `<`, `>=`,
+    /// `>` and `=` over integer literals; `div`, `mod`, `abs`, `/` and reals are left alone.
+    /// Returns the term unchanged (same uid) when nothing folds.
     fn simplify(&self, context: &mut Context) -> Self;
 }
 
@@ -43,16 +47,24 @@ fn simplify_rec(
         ATerm::App(id, args, sort) => {
             let args: Vec<Term> = args.iter().map(|a| go(a, ctx)).collect();
             let int_sort = ctx.int_sort();
-            match fold_int_app(id.0.symbol.as_str(), &args) {
-                Some(n) if sort.as_ref() == Some(&int_sort) => ctx
-                    .integer(n)
-                    .expect("Int-sorted term implies Int is supported"),
-                _ => ctx.app(id.clone(), args, sort.clone()),
+            let symbol = id.0.symbol.as_str();
+            if let Some(b) = fold_int_comparison(symbol, &args) {
+                ctx.bool(b)
+            } else {
+                match fold_int_app(symbol, &args) {
+                    Some(n) if sort.as_ref() == Some(&int_sort) => ctx
+                        .integer(n)
+                        .expect("Int-sorted term implies Int is supported"),
+                    _ => ctx.app(id.clone(), args, sort.clone()),
+                }
             }
         }
         ATerm::Eq(a, b) => {
             let (a, b) = (go(a, ctx), go(b, ctx));
-            ctx.eq(a, b)
+            match (int_literal(&a), int_literal(&b)) {
+                (Some(x), Some(y)) => ctx.bool(x == y),
+                _ => ctx.eq(a, b),
+            }
         }
         ATerm::Distinct(ts) => {
             let ts = ts.iter().map(|t| go(t, ctx)).collect();
@@ -112,6 +124,26 @@ fn fold_int_app(symbol: &str, args: &[Term]) -> Option<IBig> {
         ("-", [first, rest @ ..]) => Some(rest.iter().fold(first.clone(), |acc, v| acc - v)),
         _ => None,
     }
+}
+
+/// Value of the (chainable) comparison `symbol` over `args` if every argument is
+/// an integer literal.
+fn fold_int_comparison(symbol: &str, args: &[Term]) -> Option<bool> {
+    let holds: fn(&IBig, &IBig) -> bool = match symbol {
+        "<=" => |a, b| a <= b,
+        "<" => |a, b| a < b,
+        ">=" => |a, b| a >= b,
+        ">" => |a, b| a > b,
+        _ => return None,
+    };
+    if args.len() < 2 {
+        return None;
+    }
+    let vals = args
+        .iter()
+        .map(int_literal)
+        .collect::<Option<Vec<IBig>>>()?;
+    Some(vals.windows(2).all(|w| holds(&w[0], &w[1])))
 }
 
 /// `n` for a numeral and `-n` for `(- numeral)`, the two shapes `Context::integer` emits.
