@@ -351,37 +351,52 @@ where
     }
 }
 
-/// `(and ts)` with Boolean constants folded, as Z3's rewriter does: `false`
-/// if some conjunct is `false`, without the `true` conjuncts otherwise, and the
-/// conjunct itself if only one is left (`true` if none). E.g. Verus's
-/// `(=> %%location_label%%5 true)` would otherwise leave the label as an atom
-/// that only a decision can assign.
+/// `(and ts)` simplified as Z3's rewriter does: nested conjunctions are
+/// flattened, duplicate conjuncts dropped, and Boolean constants folded
+/// (`false` if some conjunct is `false`, without the `true` conjuncts
+/// otherwise, and the conjunct itself if only one is left, `true` if none).
+/// E.g. Verus's `(=> %%location_label%%5 true)` would otherwise leave the
+/// label as an atom, and nested conjunctions would get intermediate Tseitin
+/// variables that Z3 does not have, both of which only a decision can assign.
 fn mk_and(context: &mut Context, ts: Vec<Term>) -> Term {
-    let t = context.get_true();
-    let f = context.get_false();
-    if ts.contains(&f) {
-        return f;
-    }
-    let mut ts: Vec<Term> = ts.into_iter().filter(|x| *x != t).collect();
-    match ts.len() {
-        0 => t,
-        1 => ts.pop().unwrap(),
-        _ => context.and(ts),
-    }
+    mk_flat(context, ts, true)
 }
 
-/// `(or ts)` with Boolean constants folded (dual of `mk_and`)
+/// `(or ts)` simplified as Z3's rewriter does (dual of `mk_and`)
 fn mk_or(context: &mut Context, ts: Vec<Term>) -> Term {
-    let t = context.get_true();
-    let f = context.get_false();
-    if ts.contains(&t) {
-        return t;
+    mk_flat(context, ts, false)
+}
+
+/// `mk_and` (`conjunction`) or `mk_or`, on arguments that are already simplified
+fn mk_flat(context: &mut Context, ts: Vec<Term>, conjunction: bool) -> Term {
+    // `unit` is neutral, `zero` absorbing
+    let (unit, zero) = if conjunction {
+        (context.get_true(), context.get_false())
+    } else {
+        (context.get_false(), context.get_true())
+    };
+    let mut args: Vec<Term> = Vec::with_capacity(ts.len());
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |t: &Term, args: &mut Vec<Term>| {
+        if *t != unit && seen.insert(t.uid()) {
+            args.push(t.clone());
+        }
+    };
+    for t in &ts {
+        if *t == zero {
+            return zero;
+        }
+        match t.repr() {
+            ATerm::And(inner) if conjunction => inner.iter().for_each(|u| push(u, &mut args)),
+            ATerm::Or(inner) if !conjunction => inner.iter().for_each(|u| push(u, &mut args)),
+            _ => push(t, &mut args),
+        }
     }
-    let mut ts: Vec<Term> = ts.into_iter().filter(|x| *x != f).collect();
-    match ts.len() {
-        0 => f,
-        1 => ts.pop().unwrap(),
-        _ => context.or(ts),
+    match args.len() {
+        0 => unit,
+        1 => args.pop().unwrap(),
+        _ if conjunction => context.and(args),
+        _ => context.or(args),
     }
 }
 
