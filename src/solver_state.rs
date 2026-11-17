@@ -30,6 +30,21 @@ use crate::solver_types::{
 
 use crate::utils::DeterministicHashMap;
 
+/// The value of an integer literal: a numeral `n`, or `(- n)`.
+fn numeral_value(term: &Term) -> Option<dashu::integer::IBig> {
+    use yaspar_ir::ast::alg::Constant as C;
+    match term.repr() {
+        Constant(C::Numeral(n), _) => Some(dashu::integer::IBig::from(n.clone())),
+        App(f, args, _) if f.id_str().get() == "-" && f.0.indices.is_empty() && args.len() == 1 => {
+            match args[0].repr() {
+                Constant(C::Numeral(n), _) => Some(-dashu::integer::IBig::from(n.clone())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
         Annotated(term, _) => {
@@ -424,6 +439,13 @@ impl SolverState {
     /// Extract Op from a yaspar Term.
     pub(crate) fn extract_op(term: &Term) -> crate::egraphs::repr::Op {
         use crate::egraphs::repr::Op;
+        // A negative integer literal `(- n)` is a constant like `n`, so that it
+        // stays the root of its class and has a value (see `numeral_value`)
+        if let Some(value) = numeral_value(term)
+            && !matches!(term.repr(), Constant(..))
+        {
+            return Op::Constant(format!("Numeral({value})"));
+        }
         match term.repr() {
             Eq(_, _) => Op::Eq,
             Ite(_, _, _) => Op::Ite,
@@ -450,12 +472,11 @@ impl SolverState {
     }
 
     /// Tell the egraph the value of `term` (registered as `id`) if it is an
-    /// integer numeral.
+    /// integer literal.
     fn record_numeral(&mut self, term: &Term, id: u32) {
         use crate::egraphs::traits::EgraphTrait;
-        if let Constant(yaspar_ir::ast::alg::Constant::Numeral(n), _) = term.repr() {
-            self.egraph
-                .set_numeral(id, dashu::integer::IBig::from(n.clone()));
+        if let Some(value) = numeral_value(term) {
+            self.egraph.set_numeral(id, value);
         }
     }
 
@@ -546,7 +567,8 @@ impl SolverState {
             | Op::Implies
             | Op::Distinct => {
                 let (_, subterms) = get_subterms(term);
-                if subterms.is_empty() {
+                // Constants include `(- n)`, which has a subterm
+                if subterms.is_empty() || matches!(op, Op::Constant(_)) {
                     let uid = term.uid();
                     let egraph_id = if let Some(&eid) = self.id_map.get_by_left(&uid) {
                         eid
