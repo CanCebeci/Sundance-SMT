@@ -150,8 +150,9 @@ pub struct SolverState {
     /// Term uid -> the variables its datatype axioms created
     pub datatype_axiom_vars: HashMap<u64, std::ops::Range<i32>>,
     /// Variables a theory would create again (e.g. a term's datatype axioms),
-    /// for the propagator to bring back in scope (see `crate::instance_lifetimes`)
-    pub recreated_vars: Vec<i32>,
+    /// with the uid of the term they are about, for the propagator to bring back
+    /// in scope (see `crate::instance_lifetimes`)
+    pub recreated_vars: Vec<(u64, std::ops::Range<i32>)>,
 
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,

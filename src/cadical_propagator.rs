@@ -181,9 +181,21 @@ impl<'a> CustomExternalPropagator<'a> {
     /// Bring the variables theories produced again back in scope (see
     /// `crate::instance_lifetimes`), then apply `effects`
     fn recreate_vars(&mut self, mut effects: Effects) {
-        for var in std::mem::take(&mut self.solver_state.recreated_vars) {
-            self.instance_lifetimes
-                .recreate(var, self.decision_level, &mut effects);
+        for (uid, vars) in std::mem::take(&mut self.solver_state.recreated_vars) {
+            // Z3 has deleted a term whose instances are all dormant, so it
+            // produces nothing about it
+            let owners = self.term_owners(uid);
+            if !owners.is_empty()
+                && owners
+                    .iter()
+                    .all(|&id| !self.instance_lifetimes.is_active(id))
+            {
+                continue;
+            }
+            for var in vars {
+                self.instance_lifetimes
+                    .recreate(var, self.decision_level, &mut effects);
+            }
         }
         self.apply_lifetime_effects(effects);
     }

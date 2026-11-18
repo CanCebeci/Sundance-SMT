@@ -25,7 +25,8 @@
 //!   backtracking below it. It is created when first observed, and re-created
 //!   when a clause handed to CaDiCaL mentions it, or when a theory would produce
 //!   it again (e.g. the datatype axioms of a term, see
-//!   `SolverState::recreated_vars`).
+//!   `SolverState::recreated_vars`). A theory re-creates nothing about a term
+//!   whose instances are all dormant: Z3 has deleted such a term.
 //!
 //! Variables created at level 0, including the input's, are always in scope.
 
@@ -113,6 +114,13 @@ impl InstanceLifetimes {
             .partition_point(|(ids, _)| ids.start <= term_id);
         let (ids, id) = self.term_owners.get(i.checked_sub(1)?)?;
         ids.contains(&term_id).then_some(*id)
+    }
+
+    /// Whether instance `id` is active (not dormant)
+    pub(crate) fn is_active(&self, id: usize) -> bool {
+        self.instances
+            .get(&id)
+            .is_some_and(|state| state.level.is_some())
     }
 
     /// Whether `var` was created while materializing an instance

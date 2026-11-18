@@ -51,7 +51,7 @@ pub fn find_datatype_axioms(
     if solver_state.datatype_axioms_applied.contains(&num) {
         // Z3 would produce the axioms again when it internalizes the term again
         if let Some(vars) = solver_state.datatype_axiom_vars.get(&num).cloned() {
-            solver_state.recreated_vars.extend(vars);
+            solver_state.recreated_vars.push((num, vars));
         }
         return vector;
     }
