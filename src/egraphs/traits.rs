@@ -211,6 +211,10 @@ pub trait EgraphTrait {
     /// Check if two terms are in the same equivalence class.
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool;
 
+    /// Number of term ids allocated so far: ids are allocated in increasing
+    /// order, so the terms registered between two calls are those in between.
+    fn num_term_ids(&self) -> u32;
+
     /// A term congruent to `op` applied to `children`, if the e-graph has one:
     /// a term with this operator whose children are equal to `children`.
     fn lookup_congruent(&self, op: &Self::Op, children: &[Self::TermId]) -> Option<Self::TermId>;

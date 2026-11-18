@@ -36,6 +36,8 @@ pub(crate) enum QuantifierInstance {
         instance_id: usize,
         /// Index of the instance's root in `SolverState::relevancy_roots`
         relevancy_root: usize,
+        /// The egraph term ids allocated while materializing the instance
+        term_ids: std::ops::Range<u32>,
     },
     Skolemization {
         clauses: Vec<Vec<i32>>,
@@ -595,6 +597,7 @@ fn process_deferred_instantiations(
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
         // E-nodes this instance introduces inherit its generation (reset below)
+        let first_term_id = solver_state.egraph.num_term_ids();
         solver_state.egraph.current_generation = generation;
         solver_state.insert_predecessor(&nnf_term, None, None, true);
 
@@ -656,6 +659,7 @@ fn process_deferred_instantiations(
         let additional_constraints =
             check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
         solver_state.egraph.current_generation = 0;
+        let term_ids = first_term_id..solver_state.egraph.num_term_ids();
         proof_tracer.borrow_mut().push_steps(
             &additional_constraints,
             ProofStepType::TheoryClause(Theory::Background),
@@ -671,6 +675,7 @@ fn process_deferred_instantiations(
             bindings,
             instance_id,
             relevancy_root,
+            term_ids,
         });
     }
     results

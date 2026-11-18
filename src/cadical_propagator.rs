@@ -157,6 +157,7 @@ impl<'a> CustomExternalPropagator<'a> {
         }
         let start = self.last_observed_var;
         self.last_observed_var = next;
+        let mut effects = Effects::default();
         for var in start..next {
             if let Some(&uid) = self.solver_state.cnf_cache.var_map_reverse.get(&var) {
                 if self.solver_state.get_term_safe(uid).is_none() {
@@ -165,8 +166,45 @@ impl<'a> CustomExternalPropagator<'a> {
                 self.add_observed_variable(var);
                 self.add_lit_to_proof_tracer(var);
                 self.watch_literal(var, uid);
+                if !self.instance_lifetimes.is_instance_var(var) {
+                    let owners = self.term_owners(uid);
+                    if !owners.is_empty() {
+                        self.instance_lifetimes
+                            .add_theory_var(var, &owners, &mut effects);
+                    }
+                }
             }
         }
+        self.apply_lifetime_effects(effects);
+    }
+
+    /// The instances that created terms of the atom with solver uid `uid`
+    /// (see `crate::instance_lifetimes`)
+    fn term_owners(&self, uid: u64) -> Vec<usize> {
+        use yaspar_ir::ast::Repr as _;
+        let state = &*self.solver_state;
+        let mut owners = Vec::new();
+        let mut seen = DeterministicHashSet::default();
+        let mut stack = vec![state.get_term(uid)];
+        while let Some(t) = stack.pop() {
+            if !seen.insert(t.uid()) {
+                continue;
+            }
+            if let Some(id) = state.egraph_id(t.uid())
+                && let Some(owner) = self.instance_lifetimes.owner_of_term(id)
+                && !owners.contains(&owner)
+            {
+                owners.push(owner);
+            }
+            match t.repr() {
+                yaspar_ir::ast::ATerm::Forall(..)
+                | yaspar_ir::ast::ATerm::Exists(..)
+                | yaspar_ir::ast::ATerm::Let(..)
+                | yaspar_ir::ast::ATerm::Matching(..) => {}
+                r => stack.extend(r.sub_terms().cloned()),
+            }
+        }
+        owners
     }
 
     /// Have the egraph report when `var`'s term (with solver uid `uid`) is
@@ -494,6 +532,7 @@ impl<'a> CustomExternalPropagator<'a> {
                     bindings,
                     instance_id,
                     relevancy_root,
+                    term_ids,
                 } => {
                     self.instance_lifetimes.add(
                         *instance_id,
@@ -501,6 +540,7 @@ impl<'a> CustomExternalPropagator<'a> {
                         created.clone(),
                         clauses,
                         *relevancy_root,
+                        term_ids.clone(),
                         &mut effects,
                     );
                     self.stats.instantiations += 1;

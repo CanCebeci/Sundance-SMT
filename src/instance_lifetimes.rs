@@ -17,8 +17,11 @@
 //! reactivated at the current level, as Z3 would re-create it.
 //!
 //! A variable is deprioritized while it was created by some instance and every
-//! instance whose clauses use it is dormant; variables of the input or of other
-//! theories never are.
+//! instance whose clauses use it is dormant. A variable created otherwise, e.g. for
+//! a datatype axiom, belongs to the instances that created the terms of its atom
+//! (Z3 deletes such atoms with the terms): it is deprioritized while all of them
+//! are dormant. Variables of the input, and others over input terms only, never
+//! are.
 
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use std::ops::Range;
@@ -26,7 +29,8 @@ use std::ops::Range;
 struct InstanceState {
     /// Level the instance was (re)activated at; None while dormant
     level: Option<usize>,
-    /// Instance-created variables its clauses use
+    /// Variables it uses: instance-created ones in its clauses, and others
+    /// over terms it created
     vars: Vec<i32>,
     /// Index of its root in `SolverState::relevancy_roots`
     relevancy_root: usize,
@@ -52,11 +56,14 @@ pub(crate) struct InstanceLifetimes {
     active_users: DeterministicHashMap<i32, u32>,
     /// Variables currently deprioritized in CaDiCaL
     deprioritized: DeterministicHashSet<i32>,
+    /// (egraph term ids, instance) for each instance, by increasing ids
+    term_owners: Vec<(Range<u32>, usize)>,
 }
 
 impl InstanceLifetimes {
     /// A new instance, created at `level`, whose materialization created the
-    /// variables `created` and added `clauses`.
+    /// variables `created` and egraph terms `term_ids`, and added `clauses`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add(
         &mut self,
         id: usize,
@@ -64,8 +71,12 @@ impl InstanceLifetimes {
         created: Range<i32>,
         clauses: &[Vec<i32>],
         relevancy_root: usize,
+        term_ids: Range<u32>,
         effects: &mut Effects,
     ) {
+        if !term_ids.is_empty() {
+            self.term_owners.push((term_ids, id));
+        }
         self.instance_vars.extend(created);
         let mut vars: Vec<i32> = clauses
             .iter()
@@ -84,6 +95,39 @@ impl InstanceLifetimes {
             },
         );
         self.activate(id, level, effects);
+    }
+
+    /// Whether `var` was created while materializing an instance
+    pub(crate) fn is_instance_var(&self, var: i32) -> bool {
+        self.instance_vars.contains(&var)
+    }
+
+    /// The instance that created the egraph term `term_id`, if any
+    pub(crate) fn owner_of_term(&self, term_id: u32) -> Option<usize> {
+        let i = self
+            .term_owners
+            .partition_point(|(ids, _)| ids.start <= term_id);
+        let (ids, id) = self.term_owners.get(i.checked_sub(1)?)?;
+        ids.contains(&term_id).then_some(*id)
+    }
+
+    /// A variable created outside instance materialization whose atom is over
+    /// terms created by the instances `owners`: it belongs to them, and is
+    /// deprioritized while all of them are dormant.
+    pub(crate) fn add_theory_var(&mut self, var: i32, owners: &[usize], effects: &mut Effects) {
+        let mut active = 0;
+        for id in owners {
+            if let Some(state) = self.instances.get_mut(id) {
+                state.vars.push(var);
+                if state.level.is_some() {
+                    active += 1;
+                }
+            }
+        }
+        self.active_users.insert(var, active);
+        if active == 0 && self.deprioritized.insert(var) {
+            effects.deprioritize.push((var, true));
+        }
     }
 
     /// E-matching found the match of instance `id` again at `level`

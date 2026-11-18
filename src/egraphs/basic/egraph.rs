@@ -2083,6 +2083,10 @@ impl EgraphTrait for Egraph {
         self.find(term)
     }
 
+    fn num_term_ids(&self) -> u32 {
+        self.next_id
+    }
+
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool {
         self.find(t1) == self.find(t2)
     }
