@@ -32,6 +32,10 @@ pub(crate) enum QuantifierInstance {
         quantifier_id: u64,
         /// The match's bindings in variable declaration order (only with `--planner-trace`)
         bindings: Vec<Term>,
+        /// Identifies the match (see `SolverState::added_instantiations`)
+        instance_id: usize,
+        /// Index of the instance's root in `SolverState::relevancy_roots`
+        relevancy_root: usize,
     },
     Skolemization {
         clauses: Vec<Vec<i32>>,
@@ -39,6 +43,7 @@ pub(crate) enum QuantifierInstance {
 }
 
 struct DeferredInstantiation {
+    instance_id: usize,
     substituted_term: Term,
     is_exists: bool,
     literal: i32,
@@ -341,9 +346,13 @@ pub(crate) fn instantiate_quantifiers(
                     })
                     .collect();
 
-                if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
-                    && set.contains(&subs)
+                if let Some(&id) = solver_state
+                    .added_instantiations
+                    .get(&quantifier.id)
+                    .and_then(|matches| matches.get(&subs))
                 {
+                    // Z3 would re-create the instance if it dropped it on backtracking
+                    solver_state.rematched_instances.push(id);
                     continue;
                 }
 
@@ -365,11 +374,13 @@ pub(crate) fn instantiate_quantifiers(
                     }
                     continue;
                 }
+                let instance_id = solver_state.num_instance_ids;
+                solver_state.num_instance_ids += 1;
                 solver_state
                     .added_instantiations
                     .entry(quantifier.id)
                     .or_default()
-                    .insert(subs.clone());
+                    .insert(subs.clone(), instance_id);
 
                 // Locals order by binder id, i.e. declaration order
                 let bindings = if planner_trace() {
@@ -389,6 +400,7 @@ pub(crate) fn instantiate_quantifiers(
                     quantifier_id: quantifier.id,
                     generation,
                     bindings,
+                    instance_id,
                 });
             }
         }
@@ -550,6 +562,7 @@ fn process_deferred_instantiations(
         quantifier_id,
         generation,
         bindings,
+        instance_id,
     } in deferred_instantiations
     {
         let t = if is_exists {
@@ -593,6 +606,7 @@ fn process_deferred_instantiations(
             .collect();
 
         let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
+        let relevancy_root = solver_state.relevancy_roots.len();
         solver_state
             .relevancy_roots
             .push((quantifier_dimacs_literal, nnf_term.clone()));
@@ -655,6 +669,8 @@ fn process_deferred_instantiations(
             generation,
             quantifier_id,
             bindings,
+            instance_id,
+            relevancy_root,
         });
     }
     results

@@ -18,6 +18,7 @@ use crate::relevancy::Relevancy;
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::instance_lifetimes::{Effects, InstanceLifetimes};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -67,6 +68,8 @@ pub struct CustomExternalPropagator<'a> {
     pub reasons: DeterministicHashMap<i32, (Vec<i32>, Theory)>,
     /// The rest of the reason clause being handed to CaDiCaL, last literal first.
     pub reason_in_progress: Option<Vec<i32>>,
+    /// Dormant quantifier instances (see `crate::instance_lifetimes`)
+    pub instance_lifetimes: InstanceLifetimes,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -360,6 +363,21 @@ impl<'a> CustomExternalPropagator<'a> {
         self.queued_clauses.borrow_mut().push(clause);
     }
 
+    /// Deprioritize the variables of dormant instances in CaDiCaL and update the
+    /// relevancy filter's roots (see `crate::instance_lifetimes`)
+    fn apply_lifetime_effects(&mut self, effects: Effects) {
+        for (var, on) in effects.deprioritize {
+            unsafe {
+                (*self.solver).deprioritize(var, on);
+            }
+        }
+        if let Some(relevancy) = &mut self.relevancy {
+            for (root, enabled) in effects.roots {
+                relevancy.set_root_enabled(root as u32, enabled, &self.assignments);
+            }
+        }
+    }
+
     /// Queue the conflict clause of an arithmetic unsat core. With the
     /// incremental Z3 backend, the core may also rely on egraph merges (which
     /// have no SAT literal): each is replaced by the literals of its egraph
@@ -459,6 +477,8 @@ impl<'a> CustomExternalPropagator<'a> {
     ) {
         // Variables for these instances were created by `materialize_next` and
         // are not yet observed; tag them before tracing so the trace shows them.
+        let created = self.last_observed_var..self.solver_state.cnf_cache.next_var;
+        let mut effects = Effects::default();
         if planner_trace() {
             let next_inst = self.stats.instantiations + 1;
             for var in self.last_observed_var..self.solver_state.cnf_cache.next_var {
@@ -472,7 +492,17 @@ impl<'a> CustomExternalPropagator<'a> {
                     generation,
                     quantifier_id,
                     bindings,
+                    instance_id,
+                    relevancy_root,
                 } => {
+                    self.instance_lifetimes.add(
+                        *instance_id,
+                        self.decision_level,
+                        created.clone(),
+                        clauses,
+                        *relevancy_root,
+                        &mut effects,
+                    );
                     self.stats.instantiations += 1;
                     if planner_trace() {
                         let bindings: Vec<String> =
@@ -500,6 +530,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 self.queue_external_clause(clause.clone());
             }
         }
+        self.apply_lifetime_effects(effects);
         // Materializing an instance can enqueue arithmetic merges (via
         // `insert_predecessor`'s congruence closure). Drain them so the queue is
         // empty before control returns to CaDiCaL, as `notify_new_decision_level`
@@ -607,6 +638,13 @@ impl<'a> CustomExternalPropagator<'a> {
             max_generation,
             relevant,
         );
+        // Instances whose match was found again are no longer dormant
+        let mut effects = Effects::default();
+        for id in std::mem::take(&mut self.solver_state.rematched_instances) {
+            self.instance_lifetimes
+                .rematched(id, self.decision_level, &mut effects);
+        }
+        self.apply_lifetime_effects(effects);
         if pending.is_empty() {
             return false;
         }
@@ -828,6 +866,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_backtrack(&mut self, level: usize) {
         // Before the assignments are reset, so the trace shows the literals' levels
         self.trace_learned();
+        // Before the relevancy filter backtracks, which would re-activate the
+        // roots of the instances that become dormant
+        let mut effects = Effects::default();
+        self.instance_lifetimes.backtrack(level, &mut effects);
+        self.apply_lifetime_effects(effects);
         self.stats.backtracks += 1;
         debug_println!(
             23,

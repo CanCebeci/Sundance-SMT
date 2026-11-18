@@ -77,6 +77,9 @@ pub(crate) struct Relevancy {
     /// Guard variable -> roots it activates (roots are permanent, so these are not trailed)
     guard_watches: Vec<Vec<u32>>,
     trail: Vec<Undo>,
+    /// Roots that are not activated even when their guard holds: those of
+    /// dormant quantifier instances (see `crate::instance_lifetimes`)
+    disabled_roots: FastDeterministicHashSet<u32>,
     /// `level_starts[l]` is the trail length when decision level `l + 1` began
     level_starts: Vec<usize>,
     queue: Vec<u32>,
@@ -103,6 +106,7 @@ impl Relevancy {
             roots_seen: 0,
             guard_watches: Vec::new(),
             trail: Vec::new(),
+            disabled_roots: FastDeterministicHashSet::default(),
             level_starts: Vec::new(),
             queue: Vec::new(),
         }
@@ -202,9 +206,27 @@ impl Relevancy {
         self.propagate(solver_state, assignments);
     }
 
+    /// Enable or disable root `r` (an index into `SolverState::relevancy_roots`).
+    /// Disabling does not deactivate a root that is active: it is meant for roots
+    /// that backtracking is about to deactivate, before `backtrack` re-activates
+    /// them. An enabled root is activated if its guard holds (taking effect at
+    /// the next propagation).
+    pub(crate) fn set_root_enabled(&mut self, r: u32, enabled: bool, assignments: &[i32]) {
+        if enabled {
+            if self.disabled_roots.remove(&r) && (r as usize) < self.roots.len() {
+                self.try_activate(r, assignments);
+            }
+        } else {
+            self.disabled_roots.insert(r);
+        }
+    }
+
     fn try_activate(&mut self, r: u32, assignments: &[i32]) {
         let root = &self.roots[r as usize];
-        if root.active || (root.guard != 0 && lit_value(assignments, root.guard) <= 0) {
+        if root.active
+            || (root.guard != 0 && lit_value(assignments, root.guard) <= 0)
+            || self.disabled_roots.contains(&r)
+        {
             return;
         }
         let node = root.node;

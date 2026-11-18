@@ -125,6 +125,7 @@ pub fn cdcl_decision_procedure(
         var_origin: crate::utils::DeterministicHashMap::default(),
         reasons: crate::utils::DeterministicHashMap::default(),
         reason_in_progress: None,
+        instance_lifetimes: Default::default(),
     };
 
     solver.connect_external_propagator(&mut propagator);

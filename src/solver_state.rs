@@ -140,7 +140,13 @@ pub struct SolverState {
     pub quantifiers: Vec<Quantifier>,
 
     /// Tracks quantifier instantiations to avoid duplicates.
-    pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
+    /// Quantifier -> the matches (bindings) instantiated so far, with their instance ids
+    pub added_instantiations: HashMap<u64, HashMap<DeterministicHashMap<Local, Term>, usize>>,
+    /// Number of instance ids assigned so far
+    pub num_instance_ids: usize,
+    /// Instance ids whose match E-matching found again, for the propagator to
+    /// reactivate if dormant (see `crate::instance_lifetimes`)
+    pub rematched_instances: Vec<usize>,
 
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
@@ -210,6 +216,8 @@ impl SolverState {
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
+            num_instance_ids: 0,
+            rematched_instances: Vec::new(),
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),

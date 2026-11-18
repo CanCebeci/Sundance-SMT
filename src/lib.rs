@@ -5,6 +5,7 @@
 pub mod utils;
 pub mod arithmetic;
 mod cadical_propagator;
+mod instance_lifetimes;
 pub mod cdcl;
 pub mod cnf;
 pub mod config;
