@@ -69,8 +69,15 @@ pub struct Args {
     /// untriggered `forall` panics instead.
     #[arg(long, default_value_t = false)]
     pub infer_triggers: bool,
-    /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
-    #[arg(long, default_value_t = 3)]
+    /// CaDiCaL's `elevate` option: how clauses added during search that would
+    /// have propagated or conflicted at an earlier level are handled. -1 back-jumps
+    /// to that level; 0 backtracks chronologically; 1-3 keep the trail and elevate
+    /// the literal's level instead (1: propagated literals, 2: also decisions,
+    /// 3: also fix trail levels before conflict analysis), which saves
+    /// backtracking under lazy instantiation; 4 elevates like 3 but back-jumps on
+    /// conflicting clauses, as Z3 does (so planner traces replay in Z3).
+    #[arg(long, default_value_t = 4, allow_negative_numbers = true,
+          value_parser = clap::value_parser!(i32).range(-1..=4))]
     pub elevate: i32,
     /// Set CaDiCaL's `reverse` option: newly created variables enter the back of
     /// the VMTF decision queue instead of the front (also reverses initial order)

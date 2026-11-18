@@ -62,3 +62,8 @@ harness = false
 [[bench]]
 name = "lia_benchmarks"
 harness = false
+
+# Local checkout of the elevate fork with elevate=4 (see ../cadical-sys-elevate,
+# branch elevate-backjump-conflicts); replace by a new `rev` once it is pushed.
+[patch."https://github.com/amarshah1/cadical-sys.git"]
+cadical-sys = { path = "../cadical-sys-elevate" }
