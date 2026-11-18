@@ -75,15 +75,22 @@ pub fn check_for_function_bool(
                 // term's UID ends up in var_map. Register the original term's UID here so
                 // downstream code can find its literal.
                 assert!(vector_lit.len() == 1);
-                if vector_lit.len() == 1 {
-                    solver_state
-                        .cnf_cache
-                        .var_map
-                        .insert(term.uid(), vector_lit[0]);
-                    solver_state
-                        .cnf_cache
-                        .var_map_reverse
-                        .insert(vector_lit[0], term.uid());
+                let lit = vector_lit[0];
+                let reverse = &solver_state.cnf_cache.var_map_reverse;
+                let owned = [lit, -lit]
+                    .iter()
+                    .any(|l| reverse.get(l).is_some_and(|&uid| uid != term.uid()));
+                if owned {
+                    // The literal belongs to another term (e.g. NNF simplified
+                    // `(and x)` to `x`). Sharing it would leave one of the two
+                    // terms without a truth value in the egraph, so the term gets
+                    // a variable of its own, equivalent to the literal.
+                    let t = solver_state.get_or_allocate_lit_for_term(term);
+                    vector.push(vec![-t, lit]);
+                    vector.push(vec![t, -lit]);
+                } else {
+                    solver_state.cnf_cache.var_map.insert(term.uid(), lit);
+                    solver_state.cnf_cache.var_map_reverse.insert(lit, term.uid());
                 }
             }
         }
