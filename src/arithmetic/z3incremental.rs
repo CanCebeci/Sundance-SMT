@@ -6,7 +6,10 @@
 //! Keeps a persistent `z3::Solver` in sync with CaDiCaL's trail: each
 //! arithmetic literal is pushed via `assert_and_track` so its abs-lit
 //! recovers from an unsat core, and each egraph merge is asserted as
-//! `var_a == var_b` under the SAT lit produced by `make_eq(a, b)`.
+//! `var_a == var_b` under a tracker of its own (not a SAT literal: an equality
+//! atom made for it would become a decision variable that nothing defines).
+//! The merges in an unsat core are reported separately (`take_core_merges`),
+//! for the caller to replace by their egraph explanations.
 //! Z3 `Int` vars are keyed by raw egraph id (not union-find root), so
 //! definitional pinnings are stable across backtracks.
 
@@ -70,6 +73,14 @@ pub struct Z3IncrementalState {
     current_level: usize,
     /// Tracked arithmetic assertions added since the last arithmetic check.
     pending_partial_assertions: usize,
+    /// (a, b) -> tracker Bool of the merge `var_a == var_b`.
+    merge_trackers: DeterministicHashMap<(u32, u32), Bool>,
+    /// Merges currently in Z3's scope.
+    active_merges: DeterministicHashSet<(u32, u32)>,
+    /// Per-level record of pushed merges, mirrored on backtrack.
+    merges_by_level: Vec<Vec<(u32, u32)>>,
+    /// Merges in the last unsat core, until `take_core_merges`.
+    core_merges: Vec<(u32, u32)>,
 }
 
 impl Z3IncrementalState {
@@ -85,6 +96,10 @@ impl Z3IncrementalState {
             vars_by_level: vec![Vec::new()],
             current_level: 0,
             pending_partial_assertions: 0,
+            merge_trackers: DeterministicHashMap::new(),
+            active_merges: DeterministicHashSet::default(),
+            merges_by_level: vec![Vec::new()],
+            core_merges: Vec::new(),
         }
     }
 
@@ -99,6 +114,9 @@ impl Z3IncrementalState {
         }
         while self.vars_by_level.len() <= self.current_level {
             self.vars_by_level.push(Vec::new());
+        }
+        while self.merges_by_level.len() <= self.current_level {
+            self.merges_by_level.push(Vec::new());
         }
     }
 
@@ -240,6 +258,11 @@ impl Z3IncrementalState {
                     self.var_map.remove(&id);
                 }
             }
+            if let Some(merges) = self.merges_by_level.pop() {
+                for m in merges {
+                    self.active_merges.remove(&m);
+                }
+            }
             self.current_level -= 1;
         }
         self.ensure_level_slot();
@@ -279,77 +302,86 @@ impl Z3IncrementalState {
     }
 
     /// Drain the egraph's arithmetic merge queue, pushing each merge as a
-    /// tracked `var_a == var_b` assertion. Returns SAT lits that
-    /// `make_eq` created here (so the caller can register them as observed).
-    pub fn drain_merge_queue(&mut self, solver_state: &mut SolverState) -> Vec<i32> {
+    /// tracked `var_a == var_b` assertion.
+    pub fn drain_merge_queue(&mut self, solver_state: &mut SolverState) {
         let merges = solver_state.egraph.drain_arithmetic_equalities();
         if merges.is_empty() {
-            return Vec::new();
+            return;
         }
         self.ensure_level_slot();
-        let mut new_lits: Vec<i32> = Vec::new();
         for (a, b) in merges {
-            let lit = solver_state.make_eq(a, b);
-            let abs_lit = lit.abs();
-            if !self.tracker_by_abs_lit.contains_key(&abs_lit) {
-                new_lits.push(lit);
-            }
-            if self.active_lits.contains(&lit) {
+            if self.active_merges.contains(&(a, b)) {
                 continue;
             }
             let va = self.var_for(a, solver_state);
             let vb = self.var_for(b, solver_state);
             let tracker = self
-                .tracker_by_abs_lit
-                .entry(abs_lit)
-                .or_insert_with(|| Bool::new_const(format!("lit_{abs_lit}")))
+                .merge_trackers
+                .entry((a, b))
+                .or_insert_with(|| Bool::new_const(format!("merge_{a}_{b}")))
                 .clone();
             self.solver.push();
             self.push_counts[self.current_level] += 1;
-            self.active_lits.insert(lit);
-            self.lits_by_level[self.current_level].push(lit);
+            self.active_merges.insert((a, b));
+            self.merges_by_level[self.current_level].push((a, b));
             self.solver.assert_and_track(Int::eq(&va, vb), &tracker);
             self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
             debug_println!(
                 21,
                 0,
-                "[z3inc] pushed egraph merge var_{}==var_{} as lit {} at level {}",
+                "[z3inc] pushed egraph merge var_{}==var_{} at level {}",
                 a,
                 b,
-                lit,
                 self.current_level
             );
         }
-        new_lits
+    }
+
+    /// The merges in the last unsat core: the conflict clause the core gave
+    /// holds only given these equalities, which the caller must explain.
+    pub fn take_core_merges(&mut self) -> Vec<(u32, u32)> {
+        std::mem::take(&mut self.core_merges)
     }
 
     fn active_assumptions(&self) -> Vec<Bool> {
         self.active_lits
             .iter()
             .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
+            .chain(
+                self.active_merges
+                    .iter()
+                    .filter_map(|m| self.merge_trackers.get(m).cloned()),
+            )
             .collect()
     }
 
-    fn unsat_core_clause(&self) -> Vec<i32> {
-        let lits: DeterministicHashSet<i32> = self
-            .solver
-            .get_unsat_core()
-            .iter()
-            .filter_map(|ast| {
-                let raw = ast.to_string();
-                let abs_lit: i32 = raw.trim_matches('|').strip_prefix("lit_")?.parse().ok()?;
+    /// The negated literals of the unsat core; its merges go to `core_merges`.
+    fn unsat_core_clause(&mut self) -> Vec<i32> {
+        let mut lits: DeterministicHashSet<i32> = DeterministicHashSet::default();
+        let mut merges: Vec<(u32, u32)> = Vec::new();
+        for ast in self.solver.get_unsat_core() {
+            let raw = ast.to_string();
+            let name = raw.trim_matches('|');
+            if let Some(abs_lit) = name.strip_prefix("lit_").and_then(|n| n.parse::<i32>().ok()) {
                 let signed = if self.active_lits.contains(&abs_lit) {
                     abs_lit
                 } else {
                     -abs_lit
                 };
-                Some(-signed)
-            })
-            .collect();
+                lits.insert(-signed);
+            } else if let Some((a, b)) = name
+                .strip_prefix("merge_")
+                .and_then(|n| n.split_once('_'))
+                .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)))
+            {
+                merges.push((a, b));
+            }
+        }
         assert!(
-            !lits.is_empty(),
-            "z3incremental: unsat core contained no tracked lits"
+            !lits.is_empty() || !merges.is_empty(),
+            "z3incremental: unsat core contained no tracked lits or merges"
         );
+        self.core_merges = merges;
         lits.into_iter().collect()
     }
 

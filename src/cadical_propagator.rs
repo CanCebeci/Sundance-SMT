@@ -88,7 +88,7 @@ impl<'a> CustomExternalPropagator<'a> {
                     "PROPAGATOR: Partial arithmetic inconsistency detected: {:?}",
                     clause
                 );
-                self.queue_theory_clause(clause, Theory::QfLia);
+                self.queue_arithmetic_conflict(clause);
                 self.stats.conflicts += 1;
             }
         }
@@ -358,6 +358,82 @@ impl<'a> CustomExternalPropagator<'a> {
             .borrow_mut()
             .register_clause_for_cadical_callback(&clause);
         self.queued_clauses.borrow_mut().push(clause);
+    }
+
+    /// Queue the conflict clause of an arithmetic unsat core. With the
+    /// incremental Z3 backend, the core may also rely on egraph merges (which
+    /// have no SAT literal): each is replaced by the literals of its egraph
+    /// explanation. In the proof, a QF_UF step derives the merge's equality
+    /// (a proof-only literal) from the explanation, the QF_LIA step uses that
+    /// equality, and CaDiCaL gets their resolvent.
+    fn queue_arithmetic_conflict(&mut self, clause: Vec<i32>) {
+        #[cfg(feature = "z3-solver")]
+        let merges = self
+            .z3_incremental
+            .as_mut()
+            .map(|z3| z3.take_core_merges())
+            .unwrap_or_default();
+        #[cfg(not(feature = "z3-solver"))]
+        let merges: Vec<(u32, u32)> = Vec::new();
+        if merges.is_empty() {
+            self.queue_theory_clause(clause, Theory::QfLia);
+            return;
+        }
+        let mut lia_step = clause.clone();
+        let mut resolvent = clause;
+        let push_unique = |c: &mut Vec<i32>, l: i32| {
+            if !c.contains(&l) {
+                c.push(l);
+            }
+        };
+        for (a, b) in merges {
+            let state = &mut *self.solver_state;
+            let explanation = if a == b {
+                Some(Vec::new())
+            } else {
+                state.egraph.explain_equality(a, b)
+            };
+            let explanation_lits = explanation.map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(x, y)| state.existing_eq_lit(x, y).unwrap_or_else(|| state.make_eq(x, y)))
+                    .fold(Vec::new(), |mut lits: Vec<i32>, l| {
+                        if !lits.contains(&l) {
+                            lits.push(l);
+                        }
+                        lits
+                    })
+            });
+            let Some(explanation_lits) = explanation_lits else {
+                // Not explainable (should not happen for an active merge): fall
+                // back to an equality atom for the merge itself
+                let lit = state.make_eq(a, b);
+                push_unique(&mut lia_step, -lit);
+                push_unique(&mut resolvent, -lit);
+                continue;
+            };
+            let ta = state.get_term(state.to_solver_uid(a));
+            let tb = state.get_term(state.to_solver_uid(b));
+            let eq = yaspar_ir::ast::TermAllocator::eq(&mut state.context, ta, tb);
+            let mut tracer = self.proof_tracer.borrow_mut();
+            let merge_lit = tracer.new_proof_only_literal();
+            tracer.register_term(merge_lit, &eq, true);
+            let mut uf_step: Vec<i32> = explanation_lits.iter().map(|l| -l).collect();
+            uf_step.push(merge_lit);
+            tracer.add_theory_clause(&uf_step, Theory::QfUf);
+            drop(tracer);
+            push_unique(&mut lia_step, -merge_lit);
+            for l in explanation_lits {
+                push_unique(&mut resolvent, -l);
+            }
+        }
+        self.trace_clause("theory-clause QfLia (merges explained)", &resolvent);
+        {
+            let mut tracer = self.proof_tracer.borrow_mut();
+            tracer.add_theory_clause(&lia_step, Theory::QfLia);
+            tracer.add_sat_clause(&resolvent);
+        }
+        self.push_external_clause(resolvent);
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
@@ -893,7 +969,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         "PROPAGATOR: Arithmetic inconsistency detected: {:?}",
                         arithmetic_literals
                     );
-                    self.queue_theory_clause(arithmetic_literals, Theory::QfLia);
+                    self.queue_arithmetic_conflict(arithmetic_literals);
                     self.stats.conflicts += 1;
                     return false;
                 }
