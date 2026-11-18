@@ -152,12 +152,12 @@ impl<'a> CustomExternalPropagator<'a> {
     /// Register any new CNF variables created since the last sync.
     pub fn sync_new_vars(&mut self) {
         let next = self.solver_state.cnf_cache.next_var;
+        let mut effects = Effects::default();
         if next <= self.last_observed_var {
-            return;
+            return self.recreate_vars(effects);
         }
         let start = self.last_observed_var;
         self.last_observed_var = next;
-        let mut effects = Effects::default();
         for var in start..next {
             if let Some(&uid) = self.solver_state.cnf_cache.var_map_reverse.get(&var) {
                 if self.solver_state.get_term_safe(uid).is_none() {
@@ -166,14 +166,24 @@ impl<'a> CustomExternalPropagator<'a> {
                 self.add_observed_variable(var);
                 self.add_lit_to_proof_tracer(var);
                 self.watch_literal(var, uid);
-                if !self.instance_lifetimes.is_instance_var(var) {
-                    let owners = self.term_owners(uid);
-                    if !owners.is_empty() {
-                        self.instance_lifetimes
-                            .add_theory_var(var, &owners, &mut effects);
-                    }
-                }
+                let owners = if self.instance_lifetimes.is_instance_var(var) {
+                    Vec::new()
+                } else {
+                    self.term_owners(uid)
+                };
+                self.instance_lifetimes
+                    .add_var(var, self.decision_level, &owners, &mut effects);
             }
+        }
+        self.recreate_vars(effects);
+    }
+
+    /// Bring the variables theories produced again back in scope (see
+    /// `crate::instance_lifetimes`), then apply `effects`
+    fn recreate_vars(&mut self, mut effects: Effects) {
+        for var in std::mem::take(&mut self.solver_state.recreated_vars) {
+            self.instance_lifetimes
+                .recreate(var, self.decision_level, &mut effects);
         }
         self.apply_lifetime_effects(effects);
     }
@@ -1341,6 +1351,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         drop(v);
         if literal != 0 {
             self.add_lit_to_proof_tracer(literal);
+            // A clause mentioning a variable creates it again, as in Z3
+            let mut effects = Effects::default();
+            self.instance_lifetimes
+                .recreate(literal.abs(), self.decision_level, &mut effects);
+            self.apply_lifetime_effects(effects);
         }
         if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
             debug_println!(

@@ -49,9 +49,14 @@ pub fn find_datatype_axioms(
     // Step 1. Store the constructor in term_constructors
     let num = term.uid();
     if solver_state.datatype_axioms_applied.contains(&num) {
+        // Z3 would produce the axioms again when it internalizes the term again
+        if let Some(vars) = solver_state.datatype_axiom_vars.get(&num).cloned() {
+            solver_state.recreated_vars.extend(vars);
+        }
         return vector;
     }
     solver_state.datatype_axioms_applied.insert(num);
+    let first_var = solver_state.cnf_cache.next_var;
 
     if !solver_state.term_constructors.contains_key(&num) {
         add_to_term_constructors(solver_state, term);
@@ -110,6 +115,10 @@ pub fn find_datatype_axioms(
             solver_state.stat_dt_accessor_ax += 1;
         }
         vector.extend(selector_ctor_clauses);
+    }
+    let vars = first_var..solver_state.cnf_cache.next_var;
+    if !vars.is_empty() {
+        solver_state.datatype_axiom_vars.insert(num, vars);
     }
     vector
 }

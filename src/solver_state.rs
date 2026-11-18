@@ -147,6 +147,11 @@ pub struct SolverState {
     /// Instance ids whose match E-matching found again, for the propagator to
     /// reactivate if dormant (see `crate::instance_lifetimes`)
     pub rematched_instances: Vec<usize>,
+    /// Term uid -> the variables its datatype axioms created
+    pub datatype_axiom_vars: HashMap<u64, std::ops::Range<i32>>,
+    /// Variables a theory would create again (e.g. a term's datatype axioms),
+    /// for the propagator to bring back in scope (see `crate::instance_lifetimes`)
+    pub recreated_vars: Vec<i32>,
 
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
@@ -218,6 +223,8 @@ impl SolverState {
             added_instantiations: HashMap::default(),
             num_instance_ids: 0,
             rematched_instances: Vec::new(),
+            datatype_axiom_vars: HashMap::default(),
+            recreated_vars: Vec::new(),
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
